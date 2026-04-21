@@ -88,12 +88,6 @@ public class MiniBlockLayoutDecoder implements PageLayoutDecoder {
     int maxDefLevel = nullableLayerCount;
     boolean hasListLayer = hasListLayer(layers);
 
-    // Repetition levels are supported for list types
-    if (miniBlock.hasRepCompression() && !hasListLayer) {
-      throw new UnsupportedOperationException(
-          "MiniBlockLayout with repetition levels not yet supported (non-list)");
-    }
-
     boolean hasDictionary = miniBlock.hasDictionary();
 
     boolean isVariableWidth = miniBlock.getValueCompression().getCompressionCase()

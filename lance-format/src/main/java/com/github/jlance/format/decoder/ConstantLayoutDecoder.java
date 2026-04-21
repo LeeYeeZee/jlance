@@ -38,13 +38,26 @@ public class ConstantLayoutDecoder implements PageLayoutDecoder {
           "ConstantLayout with unsupported rep/def layers: " + layers);
     }
 
-    if (constantLayout.hasRepCompression()) {
-      throw new UnsupportedOperationException(
-          "ConstantLayout with repetition levels not yet supported");
-    }
+    boolean hasNullableItem = layers.stream()
+        .anyMatch(l -> l == RepDefLayer.REPDEF_NULLABLE_ITEM);
 
-    boolean hasNullableItem =
-        layers.size() == 1 && layers.get(0) == RepDefLayer.REPDEF_NULLABLE_ITEM;
+    // Read repetition levels if present
+    short[] repLevels = null;
+    boolean hasRep = constantLayout.hasRepCompression()
+        || constantLayout.getNumRepValues() > 0;
+    if (hasRep) {
+      byte[] repBuffer = RepDefUtils.readDefBuffer(
+          store,
+          constantLayout.hasRepCompression() ? constantLayout.getRepCompression() : null,
+          (int) constantLayout.getNumRepValues(),
+          allocator);
+      int numRep = repBuffer.length / 2;
+      repLevels = new short[numRep];
+      java.nio.ByteBuffer.wrap(repBuffer)
+          .order(java.nio.ByteOrder.LITTLE_ENDIAN)
+          .asShortBuffer()
+          .get(repLevels);
+    }
 
     // Read definition levels if present
     boolean[] validity = null;
@@ -72,7 +85,7 @@ public class ConstantLayoutDecoder implements PageLayoutDecoder {
     } else {
       vector = decodeAllSameValue(constantLayout, numRows, field, allocator);
     }
-    return new DecodedArray(vector, null, defLevels, layers);
+    return new DecodedArray(vector, repLevels, defLevels, layers);
   }
 
   private static boolean isSupportedLayer(List<RepDefLayer> layers) {
