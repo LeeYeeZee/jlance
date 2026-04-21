@@ -24,7 +24,7 @@ import org.apache.arrow.vector.types.pojo.Field;
 public class ConstantLayoutDecoder implements PageLayoutDecoder {
 
   @Override
-  public FieldVector decode(
+  public DecodedArray decodeWithRepDef(
       PageLayout layout,
       int numRows,
       PageBufferStore store,
@@ -48,6 +48,7 @@ public class ConstantLayoutDecoder implements PageLayoutDecoder {
 
     // Read definition levels if present
     boolean[] validity = null;
+    short[] defLevels = null;
     if (hasNullableItem
         && (constantLayout.hasDefCompression() || constantLayout.getNumDefValues() > 0)) {
       byte[] defBuffer =
@@ -57,17 +58,21 @@ public class ConstantLayoutDecoder implements PageLayoutDecoder {
               (int) constantLayout.getNumDefValues(),
               allocator);
       validity = RepDefUtils.decodeDefBitmap(defBuffer, numRows);
+      defLevels = new short[numRows];
+      for (int i = 0; i < numRows; i++) {
+        defLevels[i] = validity[i] ? (short) 0 : (short) 1;
+      }
     }
 
+    FieldVector vector;
     if (!constantLayout.hasInlineValue()) {
-      return decodeAllNulls(numRows, field, allocator);
+      vector = decodeAllNulls(numRows, field, allocator);
+    } else if (validity != null) {
+      vector = decodeMixedNulls(constantLayout, numRows, field, allocator, validity);
+    } else {
+      vector = decodeAllSameValue(constantLayout, numRows, field, allocator);
     }
-
-    if (validity != null) {
-      return decodeMixedNulls(constantLayout, numRows, field, allocator, validity);
-    }
-
-    return decodeAllSameValue(constantLayout, numRows, field, allocator);
+    return new DecodedArray(vector, null, defLevels, layers);
   }
 
   private static boolean isSupportedLayer(List<RepDefLayer> layers) {
@@ -151,5 +156,50 @@ public class ConstantLayoutDecoder implements PageLayoutDecoder {
 
     vector.setValueCount(numRows);
     return vector;
+  }
+
+  /**
+   * Extracts raw definition levels from a ConstantLayout page.
+   *
+   * <p>This is used by {@link com.github.jlance.format.LanceFileReader} to reconstruct
+   * nullable struct validity in V2.1+ files.
+   *
+   * @return a {@code short[]} containing one definition level per row, or {@code null}
+   *         if the layout has no nullable layer
+   */
+  public static short[] extractDefinitionLevels(
+      PageLayout layout, int numRows, PageBufferStore store, BufferAllocator allocator) {
+    var constantLayout = layout.getConstantLayout();
+    List<RepDefLayer> layers = constantLayout.getLayersList();
+
+    int nullableLayerIndex = -1;
+    for (int li = layers.size() - 1; li >= 0; li--) {
+      if (layers.get(li) == RepDefLayer.REPDEF_NULLABLE_ITEM) {
+        nullableLayerIndex = li;
+        break;
+      }
+    }
+    if (nullableLayerIndex < 0) {
+      return null;
+    }
+
+    boolean hasDefData = constantLayout.hasDefCompression()
+        || constantLayout.getNumDefValues() > 0;
+    if (!hasDefData) {
+      return new short[numRows];
+    }
+
+    byte[] defBuffer = RepDefUtils.readDefBuffer(
+        store,
+        constantLayout.hasDefCompression() ? constantLayout.getDefCompression() : null,
+        (int) constantLayout.getNumDefValues(),
+        allocator);
+    boolean[] validity = RepDefUtils.decodeDefBitmap(defBuffer, numRows);
+
+    short[] result = new short[numRows];
+    for (int i = 0; i < numRows; i++) {
+      result[i] = validity[i] ? (short) 0 : (short) 1;
+    }
+    return result;
   }
 }

@@ -69,7 +69,13 @@ public class LanceSchemaConverter {
       }
     }
 
-    FieldType fieldType = new FieldType(nullable, arrowType, null, null);
+    Map<String, String> metadata = new HashMap<>();
+    for (Map.Entry<String, com.google.protobuf.ByteString> entry :
+        lanceField.getMetadataMap().entrySet()) {
+      metadata.put(entry.getKey(), entry.getValue().toStringUtf8());
+    }
+
+    FieldType fieldType = new FieldType(nullable, arrowType, null, metadata);
     return new org.apache.arrow.vector.types.pojo.Field(name, fieldType, children);
   }
 

@@ -46,7 +46,7 @@ public class BlobLayoutDecoder implements PageLayoutDecoder {
   }
 
   @Override
-  public FieldVector decode(
+  public DecodedArray decodeWithRepDef(
       PageLayout layout,
       int numRows,
       PageBufferStore store,
@@ -88,21 +88,19 @@ public class BlobLayoutDecoder implements PageLayoutDecoder {
     // Build the result vector
     FieldVector vector = field.createVector(allocator);
     if (vector instanceof VarCharVector) {
-      return buildVarCharVector((VarCharVector) vector, numRows, positions, sizes);
+      vector = buildVarCharVector((VarCharVector) vector, numRows, positions, sizes);
+    } else if (vector instanceof VarBinaryVector) {
+      vector = buildVarBinaryVector((VarBinaryVector) vector, numRows, positions, sizes);
+    } else if (vector instanceof LargeVarCharVector) {
+      vector = buildLargeVarCharVector((LargeVarCharVector) vector, numRows, positions, sizes);
+    } else if (vector instanceof LargeVarBinaryVector) {
+      vector = buildLargeVarBinaryVector((LargeVarBinaryVector) vector, numRows, positions, sizes);
+    } else {
+      vector.close();
+      throw new UnsupportedOperationException(
+          "BlobLayout does not yet support vector type: " + vector.getClass().getName());
     }
-    if (vector instanceof VarBinaryVector) {
-      return buildVarBinaryVector((VarBinaryVector) vector, numRows, positions, sizes);
-    }
-    if (vector instanceof LargeVarCharVector) {
-      return buildLargeVarCharVector((LargeVarCharVector) vector, numRows, positions, sizes);
-    }
-    if (vector instanceof LargeVarBinaryVector) {
-      return buildLargeVarBinaryVector((LargeVarBinaryVector) vector, numRows, positions, sizes);
-    }
-
-    vector.close();
-    throw new UnsupportedOperationException(
-        "BlobLayout does not yet support vector type: " + vector.getClass().getName());
+    return new DecodedArray(vector);
   }
 
   private VarCharVector buildVarCharVector(

@@ -17,7 +17,28 @@ import org.apache.arrow.vector.types.pojo.Field;
 public interface PageLayoutDecoder {
 
   /**
+   * Decodes the given page layout into a {@link DecodedArray} containing both the
+   * vector and the rep/def state.
+   *
+   * @param layout the page layout for this page
+   * @param numRows number of rows to decode
+   * @param store buffer store containing all page buffers
+   * @param field the Arrow field descriptor
+   * @param allocator memory allocator for Arrow vectors
+   * @return the decoded array with rep/def state
+   */
+  DecodedArray decodeWithRepDef(
+      PageLayout layout,
+      int numRows,
+      PageBufferStore store,
+      Field field,
+      BufferAllocator allocator);
+
+  /**
    * Decodes the given page layout into a vector.
+   *
+   * <p>Default implementation delegates to {@link #decodeWithRepDef} and returns
+   * the vector only.
    *
    * @param layout the page layout for this page
    * @param numRows number of rows to decode
@@ -26,10 +47,12 @@ public interface PageLayoutDecoder {
    * @param allocator memory allocator for Arrow vectors
    * @return the decoded vector
    */
-  FieldVector decode(
+  default FieldVector decode(
       PageLayout layout,
       int numRows,
       PageBufferStore store,
       Field field,
-      BufferAllocator allocator);
+      BufferAllocator allocator) {
+    return decodeWithRepDef(layout, numRows, store, field, allocator).vector;
+  }
 }

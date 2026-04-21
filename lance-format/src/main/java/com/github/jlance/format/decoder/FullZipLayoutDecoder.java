@@ -25,7 +25,7 @@ import org.apache.arrow.vector.types.pojo.Field;
 public class FullZipLayoutDecoder implements PageLayoutDecoder {
 
   @Override
-  public FieldVector decode(
+  public DecodedArray decodeWithRepDef(
       PageLayout layout,
       int numRows,
       PageBufferStore store,
@@ -56,6 +56,7 @@ public class FullZipLayoutDecoder implements PageLayoutDecoder {
 
     // Read definition levels if present
     boolean[] validity = null;
+    short[] defLevels = null;
     if (fullZip.getBitsDef() > 0) {
       if (fullZip.getBitsDef() != 1) {
         throw new UnsupportedOperationException(
@@ -63,18 +64,24 @@ public class FullZipLayoutDecoder implements PageLayoutDecoder {
       }
       byte[] defBuffer = store.takeNextBuffer();
       validity = RepDefUtils.decodeDefBitmap(defBuffer, fullZip.getNumItems());
+      defLevels = new short[numRows];
+      for (int i = 0; i < numRows; i++) {
+        defLevels[i] = validity[i] ? (short) 0 : (short) 1;
+      }
     }
 
     // Decode values via compressive encoding tree
     FieldVector values = CompressiveEncodingDecoders.decodeToVector(
         fullZip.getValueCompression(), fullZip.getNumVisibleItems(), store, field, allocator);
 
+    FieldVector vector;
     if (validity != null) {
-      return FixedWidthVectorBuilder.expandWithValidity(
+      vector = FixedWidthVectorBuilder.expandWithValidity(
           values, validity, numRows, field, allocator);
+    } else {
+      vector = values;
     }
-
-    return values;
+    return new DecodedArray(vector, null, defLevels, layers);
   }
 
   private static boolean isSupportedLayer(List<RepDefLayer> layers) {
@@ -87,5 +94,44 @@ public class FullZipLayoutDecoder implements PageLayoutDecoder {
           || layer == RepDefLayer.REPDEF_NULLABLE_ITEM;
     }
     return false;
+  }
+
+  /**
+   * Extracts raw definition levels from a FullZipLayout page.
+   *
+   * <p>This is used by {@link com.github.jlance.format.LanceFileReader} to reconstruct
+   * nullable struct validity in V2.1+ files.
+   *
+   * @return a {@code short[]} containing one definition level per row, or {@code null}
+   *         if the layout has no nullable layer
+   */
+  public static short[] extractDefinitionLevels(
+      PageLayout layout, int numRows, PageBufferStore store, BufferAllocator allocator) {
+    var fullZip = layout.getFullZipLayout();
+    List<RepDefLayer> layers = fullZip.getLayersList();
+
+    int nullableLayerIndex = -1;
+    for (int li = layers.size() - 1; li >= 0; li--) {
+      if (layers.get(li) == RepDefLayer.REPDEF_NULLABLE_ITEM) {
+        nullableLayerIndex = li;
+        break;
+      }
+    }
+    if (nullableLayerIndex < 0) {
+      return null;
+    }
+
+    if (fullZip.getBitsDef() == 0) {
+      return new short[numRows];
+    }
+
+    byte[] defBuffer = store.getBuffer(store.getCurrentBufferIndex());
+    boolean[] validity = RepDefUtils.decodeDefBitmap(defBuffer, fullZip.getNumItems());
+
+    short[] result = new short[numRows];
+    for (int i = 0; i < numRows; i++) {
+      result[i] = validity[i] ? (short) 0 : (short) 1;
+    }
+    return result;
   }
 }

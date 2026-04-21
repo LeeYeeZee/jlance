@@ -3,6 +3,7 @@ package com.github.jlance.format.decoder;
 import com.github.jlance.format.buffer.PageBufferStore;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
+import java.util.ArrayList;
 import java.util.List;
 import lance.encodings21.EncodingsV21;
 import lance.encodings21.EncodingsV21.CompressiveEncoding;
@@ -146,6 +147,8 @@ public final class CompressiveEncodingDecoders {
         int bitsPerValue = (int) encoding.getOutOfLineBitpacking().getUncompressedBitsPerValue();
         yield FixedWidthVectorBuilder.build(field, numValues, buf, bitsPerValue, allocator);
       }
+      case PACKED_STRUCT -> decodePackedStructToVector(
+          encoding.getPackedStruct(), numValues, store, field, allocator);
       default -> throw new UnsupportedOperationException(
           "Unsupported compressive encoding for vector decode: " + encoding.getCompressionCase());
     };
@@ -514,6 +517,107 @@ public final class CompressiveEncodingDecoders {
           "PackedStruct only supports byte-aligned total bits, got: " + totalBits);
     }
     return decode(packed.getValues(), numValues, store, allocator);
+  }
+
+  /**
+   * Decodes a V2.1 {@link EncodingsV21.PackedStruct} compressive encoding into a {@link StructVector}.
+   *
+   * <p>The packed buffer contains all child fields interleaved in row-major order.
+   * This method splits the buffer and builds each child vector, then assembles them
+   * into a {@link StructVector}.
+   */
+  public static org.apache.arrow.vector.FieldVector decodePackedStructToVector(
+      EncodingsV21.PackedStruct packed, int numValues,
+      PageBufferStore store, Field field, BufferAllocator allocator) {
+    ByteBuffer packedBuf = decodePackedStruct(packed, numValues, store, allocator);
+    return decodePackedStructToVector(packed, numValues, packedBuf, field, allocator);
+  }
+
+  /**
+   * Decodes a V2.1 {@link EncodingsV21.PackedStruct} from an already-decompressed buffer
+   * into a {@link StructVector}.
+   */
+  public static org.apache.arrow.vector.FieldVector decodePackedStructToVector(
+      EncodingsV21.PackedStruct packed, int numValues,
+      ByteBuffer packedBuf, Field field, BufferAllocator allocator) {
+    if (!(field.getType() instanceof org.apache.arrow.vector.types.pojo.ArrowType.Struct)) {
+      throw new IllegalArgumentException(
+          "PackedStruct encoding requires a Struct field, got: " + field.getType());
+    }
+
+    java.util.List<Field> children = field.getChildren();
+    java.util.List<Long> bitsPerValueList = packed.getBitsPerValueList();
+    if (children.size() != bitsPerValueList.size()) {
+      throw new IllegalStateException(
+          "PackedStruct child count mismatch: schema has " + children.size()
+              + " children but encoding has " + bitsPerValueList.size() + " fields");
+    }
+
+    // Compute stride and child offsets
+    int[] childBytes = new int[children.size()];
+    int totalBytesPerRow = 0;
+    for (int i = 0; i < children.size(); i++) {
+      int bw = (int) (bitsPerValueList.get(i) / 8);
+      childBytes[i] = bw;
+      totalBytesPerRow += bw;
+    }
+
+    int expectedSize = numValues * totalBytesPerRow;
+    if (packedBuf.remaining() != expectedSize) {
+      throw new IllegalStateException(
+          "PackedStruct buffer size mismatch: expected " + expectedSize
+              + " bytes for " + numValues + " rows * " + totalBytesPerRow
+              + " bytes/row, got " + packedBuf.remaining());
+    }
+
+    // Build child vectors
+    java.util.List<org.apache.arrow.vector.FieldVector> childVectors = new ArrayList<>(children.size());
+    for (int i = 0; i < children.size(); i++) {
+      Field childField = children.get(i);
+      int bw = childBytes[i];
+      int childBits = bw * 8;
+
+      byte[] childData = new byte[numValues * bw];
+      int offsetInRow = 0;
+      for (int j = 0; j < i; j++) {
+        offsetInRow += childBytes[j];
+      }
+      for (int row = 0; row < numValues; row++) {
+        int rowOffset = row * totalBytesPerRow + offsetInRow;
+        packedBuf.position(rowOffset);
+        packedBuf.get(childData, row * bw, bw);
+      }
+
+      ByteBuffer childBuf = ByteBuffer.wrap(childData).order(ByteOrder.LITTLE_ENDIAN);
+      org.apache.arrow.vector.FieldVector childVec = FixedWidthVectorBuilder.build(
+          childField, numValues, childBuf, childBits, allocator);
+      childVectors.add(childVec);
+    }
+
+    // Assemble StructVector
+    org.apache.arrow.vector.complex.StructVector structVec =
+        (org.apache.arrow.vector.complex.StructVector) field.createVector(allocator);
+    structVec.setInitialCapacity(numValues);
+    structVec.allocateNew();
+
+    for (int i = 0; i < numValues; i++) {
+      org.apache.arrow.vector.BitVectorHelper.setValidityBit(
+          structVec.getValidityBuffer(), i, 1);
+    }
+
+    for (int i = 0; i < children.size(); i++) {
+      Field childField = children.get(i);
+      org.apache.arrow.vector.FieldVector childVec = childVectors.get(i);
+      @SuppressWarnings("unchecked")
+      org.apache.arrow.vector.FieldVector slot = structVec.addOrGet(
+          childField.getName(), childField.getFieldType(),
+          (Class<? extends org.apache.arrow.vector.FieldVector>) childVec.getClass());
+      childVec.makeTransferPair(slot).transfer();
+      childVec.close();
+    }
+
+    structVec.setValueCount(numValues);
+    return structVec;
   }
 
   private static ByteBuffer decodeOutOfLineBitpacking(

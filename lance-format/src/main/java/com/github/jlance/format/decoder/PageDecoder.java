@@ -55,7 +55,10 @@ public class PageDecoder {
    * @param isV21 true to use the V2.1+ {@link PageLayout} decoding path
    * @return the decoded vector
    */
-  public FieldVector decodePage(
+  /**
+   * Decodes a single page into a {@link DecodedArray} with rep/def state (V2.1+ only).
+   */
+  public DecodedArray decodePageWithRepDef(
       ColumnMetadata.Page page, Field field, int numRows, boolean isV21) throws IOException {
     // Read all buffers for this page into a store
     List<byte[]> buffers = new ArrayList<>();
@@ -75,15 +78,30 @@ public class PageDecoder {
         throw new IllegalArgumentException("Page encoding is not a direct PageLayout (V2.1+)");
       }
       PageLayoutDecoder decoder = createPageLayoutDecoder(layout);
-      return decoder.decode(layout, numRows, store, field, allocator);
+      return decoder.decodeWithRepDef(layout, numRows, store, field, allocator);
     } else {
       ArrayEncoding encoding = unpackArrayEncoding(page.getEncoding());
       if (encoding == null) {
         throw new IllegalArgumentException("Page encoding is not a direct ArrayEncoding (V2.0)");
       }
       ArrayDecoder decoder = createDecoder(encoding);
-      return decoder.decode(encoding, numRows, store, field, allocator);
+      FieldVector vector = decoder.decode(encoding, numRows, store, field, allocator);
+      return new DecodedArray(vector);
     }
+  }
+
+  /**
+   * Decodes a single page into a vector, selecting the V2.0 or V2.1+ path.
+   *
+   * @param page the page info with buffer offsets
+   * @param field the Arrow field to decode into
+   * @param numRows number of rows in the page
+   * @param isV21 true to use the V2.1+ {@link PageLayout} decoding path
+   * @return the decoded vector
+   */
+  public FieldVector decodePage(
+      ColumnMetadata.Page page, Field field, int numRows, boolean isV21) throws IOException {
+    return decodePageWithRepDef(page, field, numRows, isV21).vector;
   }
 
   /** Unpacks an ArrayEncoding from a page/column Encoding wrapper. */

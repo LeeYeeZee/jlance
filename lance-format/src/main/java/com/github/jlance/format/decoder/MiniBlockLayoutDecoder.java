@@ -30,6 +30,43 @@ import org.apache.arrow.vector.types.pojo.Field;
 public class MiniBlockLayoutDecoder implements PageLayoutDecoder {
 
   @Override
+  public DecodedArray decodeWithRepDef(
+      PageLayout layout,
+      int numRows,
+      PageBufferStore store,
+      Field field,
+      BufferAllocator allocator) {
+    var miniBlock = layout.getMiniBlockLayout();
+    List<RepDefLayer> layers = miniBlock.getLayersList();
+
+    // Pre-extract rep/def levels before the decode() path consumes buffers.
+    short[] repLevels = null;
+    short[] defLevels = null;
+    if (miniBlock.hasRepCompression() || hasRepDefLayers(layers)) {
+      try {
+        repLevels = extractRepetitionLevels(layout, numRows, store, allocator);
+      } catch (Exception e) {
+        // Ignore extraction failures for rep levels
+      }
+      try {
+        defLevels = extractDefinitionLevels(layout, numRows, store, allocator);
+      } catch (Exception e) {
+        // Ignore extraction failures for def levels
+      }
+    }
+
+    FieldVector vector = decode(layout, numRows, store, field, allocator);
+    return new DecodedArray(vector, repLevels, defLevels, layers);
+  }
+
+  private static boolean hasRepDefLayers(List<RepDefLayer> layers) {
+    return layers.stream().anyMatch(l ->
+        l == RepDefLayer.REPDEF_NULLABLE_ITEM
+            || l == RepDefLayer.REPDEF_NULLABLE_LIST
+            || l == RepDefLayer.REPDEF_EMPTYABLE_LIST
+            || l == RepDefLayer.REPDEF_NULL_AND_EMPTY_LIST);
+  }
+
   public FieldVector decode(
       PageLayout layout,
       int numRows,
@@ -432,6 +469,14 @@ public class MiniBlockLayoutDecoder implements PageLayoutDecoder {
           dictValues, allBuf, bitsPerValue, vectorSize, validity, field, allocator);
       dictValues.close();
       return result;
+    }
+
+    // V2.1 packed struct: value compression is PackedStruct and field is Struct.
+    if (field.getType() instanceof org.apache.arrow.vector.types.pojo.ArrowType.Struct
+        && miniBlock.getValueCompression().getCompressionCase()
+            == lance.encodings21.EncodingsV21.CompressiveEncoding.CompressionCase.PACKED_STRUCT) {
+      return CompressiveEncodingDecoders.decodePackedStructToVector(
+          miniBlock.getValueCompression().getPackedStruct(), vectorSize, allBuf, field, allocator);
     }
 
     if (validity != null) {
