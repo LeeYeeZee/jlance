@@ -149,6 +149,8 @@ public final class CompressiveEncodingDecoders {
       }
       case PACKED_STRUCT -> decodePackedStructToVector(
           encoding.getPackedStruct(), numValues, store, field, allocator);
+      case FSST -> decodeFsstToVector(
+          encoding.getFsst(), numValues, store, field, allocator);
       default -> throw new UnsupportedOperationException(
           "Unsupported compressive encoding for vector decode: " + encoding.getCompressionCase());
     };
@@ -487,6 +489,104 @@ public final class CompressiveEncodingDecoders {
     }
     throw new UnsupportedOperationException(
         "Variable encoding does not support vector type: " + vector.getClass().getName());
+  }
+
+  private static FieldVector decodeFsstToVector(
+      EncodingsV21.Fsst fsst, int numValues, PageBufferStore store,
+      Field field, BufferAllocator allocator) {
+    byte[] symbolTable = fsst.getSymbolTable().toByteArray();
+
+    // Decode the inner encoding.  Each "string" in the resulting vector is a
+    // chunk of FSST-compressed bytes (the inner encoding handles offsets into
+    // the compressed payload).
+    FieldVector innerVec = decodeToVector(
+        fsst.getValues(), numValues, store, field, allocator);
+
+    // Extract compressed bytes and build contiguous offsets for FSST decoder.
+    int[] compressedOffsets = new int[numValues + 1];
+    int totalCompressed = 0;
+
+    java.util.function.IntFunction<byte[]> extractor;
+    if (innerVec instanceof org.apache.arrow.vector.VarCharVector vcv) {
+      extractor = i -> vcv.get(i);
+    } else if (innerVec instanceof org.apache.arrow.vector.VarBinaryVector vbv) {
+      extractor = i -> vbv.get(i);
+    } else if (innerVec instanceof org.apache.arrow.vector.LargeVarCharVector lvcv) {
+      extractor = i -> lvcv.get(i);
+    } else if (innerVec instanceof org.apache.arrow.vector.LargeVarBinaryVector lvbv) {
+      extractor = i -> lvbv.get(i);
+    } else {
+      innerVec.close();
+      throw new UnsupportedOperationException(
+          "FSST inner encoding produced unsupported vector type: " + innerVec.getClass().getName());
+    }
+
+    compressedOffsets[0] = 0;
+    for (int i = 0; i < numValues; i++) {
+      byte[] val = extractor.apply(i);
+      totalCompressed += val.length;
+      compressedOffsets[i + 1] = totalCompressed;
+    }
+
+    byte[] compressedBytes = new byte[totalCompressed];
+    int pos = 0;
+    for (int i = 0; i < numValues; i++) {
+      byte[] val = extractor.apply(i);
+      System.arraycopy(val, 0, compressedBytes, pos, val.length);
+      pos += val.length;
+    }
+    innerVec.close();
+
+    byte[] decompressedBytes = new byte[totalCompressed * 8]; // max 8× expansion
+    int[] decompressedOffsets = new int[numValues + 1];
+
+    FsstDecoder.decompress(
+        symbolTable, compressedBytes, compressedOffsets,
+        decompressedBytes, decompressedOffsets);
+
+    FieldVector vector = field.createVector(allocator);
+    if (vector instanceof org.apache.arrow.vector.VarCharVector vec) {
+      vec.allocateNew(numValues);
+      for (int i = 0; i < numValues; i++) {
+        int start = decompressedOffsets[i];
+        int end = decompressedOffsets[i + 1];
+        vec.setSafe(i, decompressedBytes, start, end - start);
+      }
+      vec.setValueCount(numValues);
+      return vec;
+    }
+    if (vector instanceof org.apache.arrow.vector.VarBinaryVector vec) {
+      vec.allocateNew(numValues);
+      for (int i = 0; i < numValues; i++) {
+        int start = decompressedOffsets[i];
+        int end = decompressedOffsets[i + 1];
+        vec.setSafe(i, decompressedBytes, start, end - start);
+      }
+      vec.setValueCount(numValues);
+      return vec;
+    }
+    if (vector instanceof org.apache.arrow.vector.LargeVarCharVector vec) {
+      vec.allocateNew(numValues);
+      for (int i = 0; i < numValues; i++) {
+        int start = decompressedOffsets[i];
+        int end = decompressedOffsets[i + 1];
+        vec.setSafe(i, decompressedBytes, start, end - start);
+      }
+      vec.setValueCount(numValues);
+      return vec;
+    }
+    if (vector instanceof org.apache.arrow.vector.LargeVarBinaryVector vec) {
+      vec.allocateNew(numValues);
+      for (int i = 0; i < numValues; i++) {
+        int start = decompressedOffsets[i];
+        int end = decompressedOffsets[i + 1];
+        vec.setSafe(i, decompressedBytes, start, end - start);
+      }
+      vec.setValueCount(numValues);
+      return vec;
+    }
+    throw new UnsupportedOperationException(
+        "FSST does not support vector type: " + vector.getClass().getName());
   }
 
   private static ByteBuffer fieldVectorToByteBuffer(
