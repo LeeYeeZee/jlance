@@ -1,0 +1,72 @@
+# Maven build output
+target/
+!**/src/main/**/target/
+!**/src/test/**/target/
+
+# IntelliJ IDEA
+.idea/
+*.iws
+*.iml
+*.ipr
+
+# Eclipse
+.apt_generated
+.classpath
+.factorypath
+.project
+.settings/
+.springBeans
+.sts4-cache
+
+# NetBeans
+/nbproject/private/
+/nbbuild/
+/dist/
+/nbdist/
+/.nb-gradle/
+
+# VS Code
+.vscode/
+
+# Compiled class files
+*.class
+
+# Package files
+*.jar
+*.war
+*.nar
+*.ear
+*.zip
+*.tar.gz
+*.rar
+
+# JVM crash logs
+hs_err_pid*
+replay_pid*
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Temporary / debug files at root
+T.java
+TestIntVector.java
+TestRleDebug.java
+TestRleDebug2.java
+analyze_repdef.py
+analyze_repdef2.py
+inspect_buffers.py
+inspect_buffers2.py
+inspect_lance.py
+debug_*.txt
+debug_buffer_*.bin
+
+# Embedded external repositories (Rust reference source)
+lance-src/
+
+# Temporary Python packages / wheels
+tmp_lance_pkg/
+
+# Duplicate/artifact directories
+lance-tests-compat/lance-tests-compat/
+

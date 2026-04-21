@@ -1,0 +1,91 @@
+package com.github.jlance.format.decoder;
+
+import com.github.jlance.format.buffer.PageBufferStore;
+import java.util.List;
+import lance.encodings21.EncodingsV21.FullZipLayout;
+import lance.encodings21.EncodingsV21.PageLayout;
+import lance.encodings21.EncodingsV21.RepDefLayer;
+import org.apache.arrow.memory.BufferAllocator;
+import org.apache.arrow.vector.FieldVector;
+import org.apache.arrow.vector.types.pojo.Field;
+
+/**
+ * Decodes a {@link FullZipLayout} into an Arrow vector.
+ *
+ * <p>FullZipLayout is used for pages where the data is large. Values are stored in a
+ * transposed (zipped) buffer layout with optional compression.
+ *
+ * <p>Currently supports:
+ * <ul>
+ *   <li>No repetition or definition levels, or a single {@code NULLABLE_ITEM} layer</li>
+ *   <li>Fixed-width values ({@code bits_per_value})</li>
+ *   <li>{@code Flat}, {@code General(zstd/lz4)}, or {@code Dictionary} value compression</li>
+ * </ul>
+ */
+public class FullZipLayoutDecoder implements PageLayoutDecoder {
+
+  @Override
+  public FieldVector decode(
+      PageLayout layout,
+      int numRows,
+      PageBufferStore store,
+      Field field,
+      BufferAllocator allocator) {
+    var fullZip = layout.getFullZipLayout();
+
+    List<RepDefLayer> layers = fullZip.getLayersList();
+    if (!isSupportedLayer(layers)) {
+      throw new UnsupportedOperationException(
+          "FullZipLayout with unsupported rep/def layers: " + layers);
+    }
+
+    boolean hasNullableItem =
+        layers.size() == 1 && layers.get(0) == RepDefLayer.REPDEF_NULLABLE_ITEM;
+
+    // Repetition levels not yet supported
+    if (fullZip.getBitsRep() > 0) {
+      throw new UnsupportedOperationException(
+          "FullZipLayout with repetition levels not yet supported");
+    }
+
+    // Variable width not yet supported
+    if (fullZip.hasBitsPerOffset()) {
+      throw new UnsupportedOperationException(
+          "FullZipLayout with variable width (bits_per_offset) not yet supported");
+    }
+
+    // Read definition levels if present
+    boolean[] validity = null;
+    if (fullZip.getBitsDef() > 0) {
+      if (fullZip.getBitsDef() != 1) {
+        throw new UnsupportedOperationException(
+            "FullZipLayout with bits_def != 1 not yet supported, got: " + fullZip.getBitsDef());
+      }
+      byte[] defBuffer = store.takeNextBuffer();
+      validity = RepDefUtils.decodeDefBitmap(defBuffer, fullZip.getNumItems());
+    }
+
+    // Decode values via compressive encoding tree
+    FieldVector values = CompressiveEncodingDecoders.decodeToVector(
+        fullZip.getValueCompression(), fullZip.getNumVisibleItems(), store, field, allocator);
+
+    if (validity != null) {
+      return FixedWidthVectorBuilder.expandWithValidity(
+          values, validity, numRows, field, allocator);
+    }
+
+    return values;
+  }
+
+  private static boolean isSupportedLayer(List<RepDefLayer> layers) {
+    if (layers.isEmpty()) {
+      return true;
+    }
+    if (layers.size() == 1) {
+      RepDefLayer layer = layers.get(0);
+      return layer == RepDefLayer.REPDEF_ALL_VALID_ITEM
+          || layer == RepDefLayer.REPDEF_NULLABLE_ITEM;
+    }
+    return false;
+  }
+}
