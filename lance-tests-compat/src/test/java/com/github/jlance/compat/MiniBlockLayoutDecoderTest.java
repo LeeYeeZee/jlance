@@ -202,7 +202,7 @@ public class MiniBlockLayoutDecoderTest {
   }
 
   @Test
-  public void testWithRepLevelsThrows() {
+  public void testWithRepLevels() {
     try (BufferAllocator allocator = new RootAllocator()) {
       var flat = EncodingsV21.Flat.newBuilder().setBitsPerValue(32).build();
       var valueCompression = EncodingsV21.CompressiveEncoding.newBuilder().setFlat(flat).build();
@@ -220,8 +220,9 @@ public class MiniBlockLayoutDecoderTest {
 
       PageBufferStore store = new PageBufferStore(List.of(new byte[8], new byte[16]));
       MiniBlockLayoutDecoder decoder = new MiniBlockLayoutDecoder();
-      assertThrows(UnsupportedOperationException.class, () ->
-          decoder.decode(pageLayout, 4, store, int32Field("x"), allocator));
+      var vec = decoder.decode(pageLayout, 4, store, int32Field("x"), allocator);
+      assertEquals(4, vec.getValueCount());
+      vec.close();
     }
   }
 

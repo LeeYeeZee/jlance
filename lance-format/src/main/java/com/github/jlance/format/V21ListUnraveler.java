@@ -176,10 +176,12 @@ public class V21ListUnraveler {
     if (hasDef) {
       int readIdx = 0;
       int writeIdx = 0;
+      // Debug removed
       while (readIdx < repLevels.length) {
         short repVal = repLevels[readIdx];
+        short defVal = defLevels[readIdx];
+        // Debug removed
         if (repVal != 0) {
-          short defVal = defLevels[readIdx];
           // Compact: shift rep down by 1 so the next layer sees correct boundaries
           repLevels[writeIdx] = (short) (repVal - 1);
           defLevels[writeIdx] = defVal;
@@ -190,25 +192,31 @@ public class V21ListUnraveler {
             offsets.add(curlen);
             curlen += 1;
             validityList.add(true);
+            // Debug removed
           } else if (defVal > maxLevel) {
             // Masked by upper null; invisible at this rep level.
             // Do NOT add offset, but keep in buffers for upper layers.
+            // Debug removed
           } else if (defVal == nullLevel || defVal > upperNull) {
             // Null list (or list masked by a null struct)
             offsets.add(curlen);
             validityList.add(false);
+            // Debug removed
           } else if (defVal == emptyLevel) {
             // Empty list
             offsets.add(curlen);
             validityList.add(true);
+            // Debug removed
           } else {
             // New valid list starting with null item
             offsets.add(curlen);
             curlen += 1;
             validityList.add(true);
+            // Debug removed
           }
         } else {
           curlen += 1;
+          // Debug removed
         }
         readIdx++;
       }
@@ -343,6 +351,62 @@ public class V21ListUnraveler {
       default:
         return 0;
     }
+  }
+
+  /**
+   * Skips the given number of list layers without computing offsets.
+   * Updates internal state and truncates rep/def buffers just as
+   * {@link #unravelOffsets(int)} would, so subsequent calls continue
+   * from the next outer list layer.
+   */
+  public void skipListLayers(int count) {
+    for (int i = 0; i < count; i++) {
+      while (currentLayer < layers.size() && !isListLayer(layers.get(currentLayer))) {
+        currentDefCmp += defLevelsForLayer(layers.get(currentLayer));
+        currentLayer++;
+      }
+      if (currentLayer >= layers.size()) {
+        break;
+      }
+      RepDefLayer currentLayerType = layers.get(currentLayer);
+      currentLayer++;
+      currentDefCmp += defLevelsForLayer(currentLayerType);
+      currentRepCmp += 1;
+
+      // Truncate rep/def exactly as unravelOffsets does for rep != 0 entries
+      if (repLevels.length > 0) {
+        int writeIdx = 0;
+        for (int j = 0; j < repLevels.length; j++) {
+          if (repLevels[j] != 0) {
+            repLevels[writeIdx] = (short) (repLevels[j] - 1);
+            if (defLevels.length > 0) {
+              defLevels[writeIdx] = defLevels[j];
+            }
+            writeIdx++;
+          }
+        }
+        if (writeIdx < repLevels.length) {
+          short[] newRep = new short[writeIdx];
+          short[] newDef = new short[writeIdx];
+          System.arraycopy(repLevels, 0, newRep, 0, writeIdx);
+          System.arraycopy(defLevels, 0, newDef, 0, writeIdx);
+          repLevels = newRep;
+          defLevels = newDef;
+        }
+      }
+    }
+  }
+
+  public short[] getRepLevels() {
+    return repLevels;
+  }
+
+  public short[] getDefLevels() {
+    return defLevels;
+  }
+
+  public int getCurrentLayer() {
+    return currentLayer;
   }
 
   private static boolean isListLayer(RepDefLayer layer) {

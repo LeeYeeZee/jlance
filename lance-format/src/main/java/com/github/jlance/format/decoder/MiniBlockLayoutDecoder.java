@@ -290,7 +290,7 @@ public class MiniBlockLayoutDecoder implements PageLayoutDecoder {
           chunkOffset += defSize;
           chunkOffset += (8 - (chunkOffset % 8)) % 8;
 
-          if (!hasListLayer) {
+          if (!hasListLayer || hasNullableItem) {
             ByteBuffer defBuf;
             if (miniBlock.hasDefCompression()) {
               PageBufferStore defStore = new PageBufferStore(List.of(defBytes));
@@ -303,8 +303,28 @@ public class MiniBlockLayoutDecoder implements PageLayoutDecoder {
             short[] defLevels = new short[numLevels];
             defBuf.asShortBuffer().get(defLevels);
             boolean[] chunkValidity = new boolean[numLevels];
-            for (int j = 0; j < numLevels; j++) {
-              chunkValidity[j] = (defLevels[j] == 0);
+            if (hasListLayer) {
+              int nullItemLevel = computeNullItemLevel(layers);
+              int maxVisibleLevel = computeMaxVisibleLevel(layers);
+              // Filter out masked entries (def > maxVisibleLevel) so validity aligns with data values.
+              int visibleCount = 0;
+              for (int j = 0; j < numLevels; j++) {
+                if (defLevels[j] <= maxVisibleLevel) {
+                  visibleCount++;
+                }
+              }
+              chunkValidity = new boolean[visibleCount];
+              int vidx = 0;
+              for (int j = 0; j < numLevels; j++) {
+                if (defLevels[j] <= maxVisibleLevel) {
+                  chunkValidity[vidx] = (defLevels[j] != nullItemLevel);
+                  vidx++;
+                }
+              }
+            } else {
+              for (int j = 0; j < numLevels; j++) {
+                chunkValidity[j] = (defLevels[j] == 0);
+              }
             }
             chunkValidities.add(chunkValidity);
           }
@@ -1017,6 +1037,57 @@ public class MiniBlockLayoutDecoder implements PageLayoutDecoder {
             || l == RepDefLayer.REPDEF_NULLABLE_LIST
             || l == RepDefLayer.REPDEF_EMPTYABLE_LIST
             || l == RepDefLayer.REPDEF_NULL_AND_EMPTY_LIST);
+  }
+
+  private static int computeNullItemLevel(List<RepDefLayer> layers) {
+    int currentDef = 0;
+    for (RepDefLayer layer : layers) {
+      switch (layer) {
+        case REPDEF_ALL_VALID_ITEM:
+        case REPDEF_ALL_VALID_LIST:
+          break;
+        case REPDEF_NULLABLE_ITEM:
+          return currentDef + 1;
+        case REPDEF_NULLABLE_LIST:
+        case REPDEF_EMPTYABLE_LIST:
+          currentDef += 1;
+          break;
+        case REPDEF_NULL_AND_EMPTY_LIST:
+          currentDef += 2;
+          break;
+        default:
+          break;
+      }
+    }
+    return -1;
+  }
+
+  private static int computeMaxVisibleLevel(List<RepDefLayer> layers) {
+    int level = 0;
+    for (RepDefLayer layer : layers) {
+      if (layer == RepDefLayer.REPDEF_ALL_VALID_LIST
+          || layer == RepDefLayer.REPDEF_NULLABLE_LIST
+          || layer == RepDefLayer.REPDEF_EMPTYABLE_LIST
+          || layer == RepDefLayer.REPDEF_NULL_AND_EMPTY_LIST) {
+        break;
+      }
+      switch (layer) {
+        case REPDEF_ALL_VALID_ITEM:
+        case REPDEF_ALL_VALID_LIST:
+          break;
+        case REPDEF_NULLABLE_ITEM:
+        case REPDEF_NULLABLE_LIST:
+        case REPDEF_EMPTYABLE_LIST:
+          level += 1;
+          break;
+        case REPDEF_NULL_AND_EMPTY_LIST:
+          level += 2;
+          break;
+        default:
+          break;
+      }
+    }
+    return level;
   }
 }
 

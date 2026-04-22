@@ -298,14 +298,22 @@ public class LanceFileReader implements AutoCloseable {
       return buildStructVector(field, nextColIndex, footer, numRows, allocator);
     }
 
-    ColumnMetadata cm = footer.getColumnMetadatas().get(nextColIndex[0]);
-    nextColIndex[0]++;
-
     if (field.getType() instanceof ArrowType.List || field.getType() instanceof ArrowType.LargeList) {
+      if (footer.isV2_1OrLater()) {
+        PageLayout layout = PageDecoder.unpackPageLayout(
+            footer.getColumnMetadatas().get(nextColIndex[0]).getPages(0).getEncoding());
+        if (layout != null) {
+          return decodeV21ListColumn(field, nextColIndex, footer, numRows, allocator);
+        }
+      }
+      ColumnMetadata cm = footer.getColumnMetadatas().get(nextColIndex[0]);
+      nextColIndex[0]++;
       FieldVector vector = decodeListColumn(cm, field, nextColIndex, footer, numRows, allocator);
       return new DecodedArray(vector);
     }
 
+    ColumnMetadata cm = footer.getColumnMetadatas().get(nextColIndex[0]);
+    nextColIndex[0]++;
     return decodePrimitiveColumn(cm, field, footer, numRows, allocator);
   }
 
@@ -327,7 +335,6 @@ public class LanceFileReader implements AutoCloseable {
     boolean isNullableStruct = isV21 && field.isNullable();
     short[] structDefLevels = null;
     int structLayerIndex = -1;
-
     List<DecodedArray> childArrays = new ArrayList<>();
 
     for (int ci = 0; ci < field.getChildren().size(); ci++) {
@@ -344,81 +351,36 @@ public class LanceFileReader implements AutoCloseable {
       childVec.close();
     }
 
-    // Try to get rep/def from first child's DecodedArray (V2.1+ path)
+    // V2.1+ nullable struct: derive validity from first child's rep/def levels.
     if (isNullableStruct && !childArrays.isEmpty()) {
       DecodedArray firstChild = childArrays.get(0);
       if (firstChild.defLevels != null && firstChild.layers != null) {
-        for (int li = firstChild.layers.size() - 1; li >= 0; li--) {
-          if (firstChild.layers.get(li)
-              == lance.encodings21.EncodingsV21.RepDefLayer.REPDEF_NULLABLE_ITEM) {
-            structLayerIndex = li;
-            structDefLevels = firstChild.defLevels;
-            break;
-          }
-        }
-      }
-    }
-
-    // Fallback: peek the first child's page directly if DecodedArray didn't carry rep/def
-    if (structDefLevels == null && isNullableStruct && !childArrays.isEmpty()) {
-      int firstChildColIndex = nextColIndex[0] - childArrays.size();
-      ColumnMetadata cm = footer.getColumnMetadatas().get(firstChildColIndex);
-      if (cm.getPagesCount() > 0) {
-        var page = cm.getPages(0);
-        List<byte[]> buffers = new ArrayList<>();
-        for (int i = 0; i < page.getBufferOffsetsCount(); i++) {
-          long offset = page.getBufferOffsets(i);
-          long size = page.getBufferSizes(i);
-          ByteBuffer buf = BufferReader.readBuffer(channel, offset, size);
-          byte[] data = new byte[(int) size];
-          buf.get(data);
-          buffers.add(data);
-        }
-        PageBufferStore store = new PageBufferStore(buffers);
-        var layout = PageDecoder.unpackPageLayout(page.getEncoding());
-        if (layout != null) {
-          java.util.List<lance.encodings21.EncodingsV21.RepDefLayer> layers = null;
-          if (layout.hasMiniBlockLayout()) {
-            layers = layout.getMiniBlockLayout().getLayersList();
-          } else if (layout.hasConstantLayout()) {
-            layers = layout.getConstantLayout().getLayersList();
-          } else if (layout.hasFullZipLayout()) {
-            layers = layout.getFullZipLayout().getLayersList();
-          }
-          if (layers != null) {
-            for (int li = layers.size() - 1; li >= 0; li--) {
-              if (layers.get(li)
-                  == lance.encodings21.EncodingsV21.RepDefLayer.REPDEF_NULLABLE_ITEM) {
-                structLayerIndex = li;
-                break;
+        int nullStructLevel = computeNullItemLevel(firstChild.layers);
+        if (nullStructLevel >= 0) {
+          short[] def = firstChild.defLevels;
+          if (firstChild.repLevels != null && firstChild.repLevels.length > 0) {
+            // List child: rep > 0 marks a new row.  Check the first entry of each row.
+            short[] rep = firstChild.repLevels;
+            int entryIdx = 0;
+            for (int row = 0; row < numRows && entryIdx < rep.length; row++) {
+              boolean structNull = (def[entryIdx] == nullStructLevel);
+              org.apache.arrow.vector.BitVectorHelper.setValidityBit(
+                  struct.getValidityBuffer(), row, structNull ? 0 : 1);
+              // Advance to the start of the next row.
+              entryIdx++;
+              while (entryIdx < rep.length && rep[entryIdx] == 0) {
+                entryIdx++;
               }
             }
-            if (structLayerIndex >= 0) {
-              if (layout.hasMiniBlockLayout()) {
-                structDefLevels =
-                    com.github.jlance.format.decoder.MiniBlockLayoutDecoder
-                        .extractDefinitionLevels(layout, numRows, store, allocator);
-              } else if (layout.hasConstantLayout()) {
-                structDefLevels =
-                    com.github.jlance.format.decoder.ConstantLayoutDecoder
-                        .extractDefinitionLevels(layout, numRows, store, allocator);
-              } else if (layout.hasFullZipLayout()) {
-                structDefLevels =
-                    com.github.jlance.format.decoder.FullZipLayoutDecoder
-                        .extractDefinitionLevels(layout, numRows, store, allocator);
-              }
+          } else {
+            // Primitive child: one def level per row.
+            for (int i = 0; i < numRows; i++) {
+              boolean structNull = (def[i] < nullStructLevel);
+              org.apache.arrow.vector.BitVectorHelper.setValidityBit(
+                  struct.getValidityBuffer(), i, structNull ? 0 : 1);
             }
           }
         }
-      }
-    }
-
-    if (structDefLevels != null && structLayerIndex >= 0) {
-      int mask = 1 << structLayerIndex;
-      for (int i = 0; i < numRows; i++) {
-        boolean structValid = (structDefLevels[i] & mask) == 0;
-        org.apache.arrow.vector.BitVectorHelper.setValidityBit(
-            struct.getValidityBuffer(), i, structValid ? 1 : 0);
       }
     }
 
@@ -502,10 +464,12 @@ public class LanceFileReader implements AutoCloseable {
       BufferAllocator allocator)
       throws IOException {
     // V2.1+ list: encoded with PageLayout (MiniBlockLayout/FullZipLayout) using rep/def levels.
+    // This path is normally handled in readField() before decodeListColumn is called.
     if (footer.isV2_1OrLater()) {
       PageLayout layout = PageDecoder.unpackPageLayout(cm.getPages(0).getEncoding());
       if (layout != null) {
-        return decodeV21ListColumn(cm, field, numRows, allocator);
+        throw new IllegalStateException(
+            "V2.1 list should be decoded via decodeV21ListColumn from readField");
       }
     }
 
@@ -654,10 +618,15 @@ public class LanceFileReader implements AutoCloseable {
    *
    * <p>V2.1 list columns use {@link PageLayout} (e.g. MiniBlockLayout) with rep/def
    * levels instead of the V2.0 {@code ArrayEncoding.List} offsets wrapper.
+   *
+   * <p>The list itself does not consume a column index in V2.1; the first child column
+   * carries the rep/def for this list (and any inner lists).  Struct items are handled
+   * by recursively reading child columns.
    */
-  private FieldVector decodeV21ListColumn(
-      ColumnMetadata cm,
+  private DecodedArray decodeV21ListColumn(
       Field field,
+      int[] nextColIndex,
+      LanceFileFooter footer,
       int numRows,
       BufferAllocator allocator)
       throws IOException {
@@ -665,17 +634,19 @@ public class LanceFileReader implements AutoCloseable {
       throw new IllegalStateException("List field has no children: " + field.getName());
     }
     Field itemField = field.getChildren().get(0);
+
+    // In V2.1 the list does not consume a column.  The first child column
+    // (or descendant leaf column) contains the rep/def levels.
+    ColumnMetadata cm = footer.getColumnMetadatas().get(nextColIndex[0]);
     Field innermostField = getInnermostField(itemField);
 
     // Accumulate rep/def levels and item vectors across all pages.
     List<short[]> allRepLevels = new ArrayList<>();
     List<short[]> allDefLevels = new ArrayList<>();
     List<FieldVector> itemVectors = new ArrayList<>();
-    int totalRows = 0;
 
     for (ColumnMetadata.Page page : cm.getPagesList()) {
       int pageRows = (int) page.getLength();
-      totalRows += pageRows;
 
       // Read page buffers
       List<byte[]> buffers = new ArrayList<>();
@@ -687,30 +658,21 @@ public class LanceFileReader implements AutoCloseable {
         buf.get(data);
         buffers.add(data);
       }
-      try {
-        for (int i = 0; i < buffers.size(); i++) {
-          java.nio.file.Files.write(
-              java.nio.file.Path.of("C:/Users/22591/jlance/debug_buffer_" + i + ".bin"),
-              buffers.get(i));
-        }
-      } catch (Exception e) {
-        // ignore
-      }
       PageBufferStore store = new PageBufferStore(buffers);
       PageLayout layout = PageDecoder.unpackPageLayout(page.getEncoding());
       if (layout == null) {
         throw new IllegalStateException("Expected PageLayout for V2.1 list column");
       }
 
-      // Extract rep/def levels based on layout type
       short[] repLevels = null;
       short[] defLevels = null;
       int itemCount = 0;
-      List<RepDefLayer> pageLayers;
-      FieldVector itemVec;
+      List<RepDefLayer> pageLayers = null;
+      FieldVector itemVec = null;
 
       if (layout.hasMiniBlockLayout()) {
         var miniBlock = layout.getMiniBlockLayout();
+
         repLevels = MiniBlockLayoutDecoder.extractRepetitionLevels(
             layout, pageRows, store, allocator);
         defLevels = MiniBlockLayoutDecoder.extractDefinitionLevels(
@@ -730,9 +692,11 @@ public class LanceFileReader implements AutoCloseable {
           itemCount = repLevels != null ? repLevels.length : 0;
         }
 
-        store.resetBufferIndex();
-        MiniBlockLayoutDecoder decoder = new MiniBlockLayoutDecoder();
-        itemVec = decoder.decode(layout, itemCount, store, innermostField, allocator);
+        if (!(itemField.getType() instanceof ArrowType.Struct)) {
+          store.resetBufferIndex();
+          MiniBlockLayoutDecoder decoder = new MiniBlockLayoutDecoder();
+          itemVec = decoder.decode(layout, itemCount, store, innermostField, allocator);
+        }
       } else if (layout.hasConstantLayout()) {
         var constantLayout = layout.getConstantLayout();
         pageLayers = constantLayout.getLayersList();
@@ -741,8 +705,6 @@ public class LanceFileReader implements AutoCloseable {
         if (hasListLayer
             && constantLayout.getNumRepValues() == 0
             && constantLayout.getNumDefValues() == 0) {
-          // No rep/def values: all rows have the same structure determined by layers.
-          // Consume any present buffers (they may be padding or unused).
           if (store.getCurrentBufferIndex() < store.getBufferCount()) {
             store.takeNextBuffer();
           }
@@ -753,7 +715,6 @@ public class LanceFileReader implements AutoCloseable {
           defLevels = new short[0];
           itemCount = 0;
         } else if (hasListLayer) {
-          // Read rep/def from page buffers (raw u16 values)
           if (store.getCurrentBufferIndex() < store.getBufferCount()) {
             byte[] repBuffer = store.takeNextBuffer();
             int numRep = repBuffer.length / 2;
@@ -785,10 +746,10 @@ public class LanceFileReader implements AutoCloseable {
           itemCount = repLevels != null ? repLevels.length : 0;
         }
 
-        // For ConstantLayout, store buffers already consumed (rep/def)
-        // No value buffer for all-null/all-empty
-        ConstantLayoutDecoder decoder = new ConstantLayoutDecoder();
-        itemVec = decoder.decode(layout, itemCount, store, innermostField, allocator);
+        if (!(itemField.getType() instanceof ArrowType.Struct)) {
+          ConstantLayoutDecoder decoder = new ConstantLayoutDecoder();
+          itemVec = decoder.decode(layout, itemCount, store, innermostField, allocator);
+        }
       } else {
         throw new UnsupportedOperationException(
             "Unsupported V2.1 list layout: " + layout.getLayoutCase());
@@ -796,22 +757,15 @@ public class LanceFileReader implements AutoCloseable {
 
       allRepLevels.add(repLevels);
       allDefLevels.add(defLevels);
-      itemVectors.add(itemVec);
-      // page itemCount decoded
-      StringBuilder sb = new StringBuilder();
-      for (int i = 0; i < Math.min(10, itemVec.getValueCount()); i++) {
-        sb.append("[").append(i).append("]").append(itemVec.isNull(i) ? "null" : "v").append(" ");
+      if (itemVec != null) {
+        itemVectors.add(itemVec);
       }
-      // first 10 items null status checked
     }
 
     // Merge multi-page data
     short[] repLevels = mergeShortArrays(allRepLevels);
     short[] defLevels = mergeShortArrays(allDefLevels);
-    // repLevels and defLevels merged successfully
-    FieldVector itemVec = mergeFieldVectors(itemVectors, innermostField, allocator);
 
-    // Compute list structure from rep/def levels
     List<RepDefLayer> layers;
     if (cm.getPages(0).getEncoding().hasDirect()) {
       PageLayout firstLayout = PageDecoder.unpackPageLayout(cm.getPages(0).getEncoding());
@@ -826,40 +780,55 @@ public class LanceFileReader implements AutoCloseable {
       layers = java.util.Collections.emptyList();
     }
 
-    int maxVisibleLevel = computeMaxVisibleLevel(layers);
-    int nullItemLevel = computeNullItemLevel(layers);
-    int nullListLevel = computeNullListLevel(layers);
-    int emptyListLevel = computeEmptyListLevel(layers);
-    boolean hasDef = defLevels != null && defLevels.length > 0;
-
     int listLayerCount = 0;
     for (RepDefLayer layer : layers) {
       if (isListLayer(layer)) {
         listLayerCount++;
       }
     }
-    if (listLayerCount > 1) {
+
+    if (listLayerCount > 1 || itemField.getType() instanceof ArrowType.Struct) {
       V21ListUnraveler unraveler = new V21ListUnraveler(repLevels, defLevels, layers);
 
-      // Pre-compute all list layers (inner-to-outer order).
-      // Each call to unravelOffsets consumes one list layer.
+      boolean isOutermostList = countListLayersDeep(field) == listLayerCount;
+      int skipLayers = isOutermostList ? countListLayersDeep(itemField) : 0;
+      int unravelCount = countListLayersDeep(field) - countListLayersDeep(itemField);
+      if (skipLayers > 0) {
+        unraveler.skipListLayers(skipLayers);
+      }
+
       java.util.List<V21ListUnraveler.UnravelResult> layerResults = new java.util.ArrayList<>();
-      while (unraveler.hasMoreListLayers()) {
+      for (int i = 0; i < unravelCount && unraveler.hasMoreListLayers(); i++) {
         layerResults.add(unraveler.unravelOffsets(numRows));
       }
 
-      // Build vectors bottom-up: start with the leaf items and wrap each layer.
-      FieldVector currentVec = itemVec;
-      Field currentField = getInnermostField(field);
+      FieldVector currentVec;
+      if (itemField.getType() instanceof ArrowType.Struct) {
+        int itemCount = layerResults.isEmpty() ? numRows
+            : layerResults.get(0).offsets[layerResults.get(0).offsets.length - 1];
+        DecodedArray itemArray = readField(itemField, nextColIndex, footer, itemCount, allocator);
+        currentVec = itemArray.vector;
+      } else {
+        nextColIndex[0]++;
+        currentVec = mergeFieldVectors(itemVectors, innermostField, allocator);
+      }
+
       for (int i = 0; i < layerResults.size(); i++) {
-        // Walk up from innermost field to the field for this layer.
-        // layerResults[0] = innermost list, layerResults[last] = outermost list.
         int depthFromInner = layerResults.size() - 1 - i;
-        currentField = getFieldAtDepth(field, depthFromInner);
+        Field currentField = getFieldAtDepth(field, depthFromInner);
         currentVec = buildListVector(currentVec, currentField, layerResults.get(i), allocator);
       }
-      return currentVec;
+      return new DecodedArray(currentVec, repLevels, defLevels, layers);
     }
+
+    // Single-layer list with primitive item (original logic)
+    nextColIndex[0]++;
+    FieldVector itemVec = mergeFieldVectors(itemVectors, innermostField, allocator);
+    int maxVisibleLevel = computeMaxVisibleLevel(layers);
+    int nullItemLevel = computeNullItemLevel(layers);
+    int nullListLevel = computeNullListLevel(layers);
+    int emptyListLevel = computeEmptyListLevel(layers);
+    boolean hasDef = defLevels != null && defLevels.length > 0;
 
     int[] offsets = new int[numRows + 1];
     boolean[] listValidity = new boolean[numRows];
@@ -884,7 +853,6 @@ public class LanceFileReader implements AutoCloseable {
 
         if (hasDef) {
           if (def <= maxVisibleLevel) {
-            // Actual item (normal or null item)
             if (itemIdx < itemCount) {
               itemValidity[itemIdx] = (def != nullItemLevel);
             }
@@ -895,28 +863,24 @@ public class LanceFileReader implements AutoCloseable {
             listValidity[rowIdx - 1] = true;
           }
         } else {
-          // No def levels: every entry is an actual item
           itemIdx++;
         }
       }
     }
     offsets[numRows] = itemIdx;
 
-    // Normal lists (non-null, non-empty) default to valid
     for (int i = 0; i < numRows; i++) {
       if (offsets[i + 1] > offsets[i]) {
         listValidity[i] = true;
       }
     }
 
-    // Apply item validity
     for (int i = 0; i < itemCount; i++) {
       if (!itemValidity[i]) {
         itemVec.setNull(i);
       }
     }
 
-    // Build Arrow ListVector or LargeListVector
     FieldVector vector = field.createVector(allocator);
     if (vector instanceof ListVector) {
       ListVector listVec = (ListVector) vector;
@@ -942,7 +906,7 @@ public class LanceFileReader implements AutoCloseable {
 
       listVec.setLastSet(numRows - 1);
       listVec.setValueCount(numRows);
-      return listVec;
+      return new DecodedArray(listVec, repLevels, defLevels, layers);
     }
     if (vector instanceof LargeListVector) {
       LargeListVector listVec = (LargeListVector) vector;
@@ -968,7 +932,7 @@ public class LanceFileReader implements AutoCloseable {
 
       listVec.setLastSet(numRows - 1);
       listVec.setValueCount(numRows);
-      return listVec;
+      return new DecodedArray(listVec);
     }
     throw new UnsupportedOperationException(
         "Unsupported list vector type: " + vector.getClass().getName());
@@ -988,6 +952,33 @@ public class LanceFileReader implements AutoCloseable {
       }
     }
     return current;
+  }
+
+  /**
+   * Counts the total number of list layers in a field and all its descendants.
+   * For a {@code list<struct<items: list<int>, name: string>>} this returns 2
+   * (outer list + inner list).
+   */
+  private static int countListLayersDeep(Field field) {
+    int count = 0;
+    Field current = field;
+    while (!current.getChildren().isEmpty()) {
+      ArrowType type = current.getType();
+      if (type instanceof ArrowType.List || type instanceof ArrowType.LargeList) {
+        count++;
+        current = current.getChildren().get(0);
+      } else if (type instanceof ArrowType.Struct) {
+        int maxChild = 0;
+        for (Field child : current.getChildren()) {
+          maxChild = Math.max(maxChild, countListLayersDeep(child));
+        }
+        count += maxChild;
+        break;
+      } else {
+        break;
+      }
+    }
+    return count;
   }
 
   /**
