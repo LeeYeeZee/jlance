@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright The Lance Authors
+
 package com.github.jlance.compat;
 
 import static org.assertj.core.api.Assertions.assertThat;
