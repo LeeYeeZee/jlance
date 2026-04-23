@@ -22,6 +22,7 @@ public class DecodedArray {
   public final short[] repLevels;
   public final short[] defLevels;
   public final List<RepDefLayer> layers;
+  public final List<com.github.jlance.format.V21ListUnraveler.UnravelResult> listResults;
 
   /**
    * Creates a decoded array with rep/def state.
@@ -36,17 +37,27 @@ public class DecodedArray {
       short[] repLevels,
       short[] defLevels,
       List<RepDefLayer> layers) {
+    this(vector, repLevels, defLevels, layers, null);
+  }
+
+  public DecodedArray(
+      FieldVector vector,
+      short[] repLevels,
+      short[] defLevels,
+      List<RepDefLayer> layers,
+      List<com.github.jlance.format.V21ListUnraveler.UnravelResult> listResults) {
     this.vector = vector;
     this.repLevels = repLevels;
     this.defLevels = defLevels;
     this.layers = layers != null ? Collections.unmodifiableList(layers) : null;
+    this.listResults = listResults;
   }
 
   /**
    * Creates a decoded array with no rep/def state (e.g. V2.0 columns or all-valid primitive).
    */
   public DecodedArray(FieldVector vector) {
-    this(vector, null, null, null);
+    this(vector, null, null, null, null);
   }
 
   /**

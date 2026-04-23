@@ -54,12 +54,17 @@ public class V21ListUnraveler {
    * @param layers    layer definitions, inner-to-outer
    */
   public V21ListUnraveler(short[] repLevels, short[] defLevels, List<RepDefLayer> layers) {
-    this.repLevels = repLevels != null ? repLevels : new short[0];
-    this.defLevels = defLevels != null ? defLevels : new short[0];
+    this(repLevels, defLevels, layers, 0, 0, 0);
+  }
+
+  public V21ListUnraveler(short[] repLevels, short[] defLevels, List<RepDefLayer> layers,
+      int startLayer, int startDefCmp, int startRepCmp) {
+    this.repLevels = repLevels != null ? repLevels.clone() : new short[0];
+    this.defLevels = defLevels != null ? defLevels.clone() : new short[0];
     this.layers = layers;
-    this.currentLayer = 0;
-    this.currentDefCmp = 0;
-    this.currentRepCmp = 0;
+    this.currentLayer = startLayer;
+    this.currentDefCmp = startDefCmp;
+    this.currentRepCmp = startRepCmp;
   }
 
   /**
@@ -167,6 +172,7 @@ public class V21ListUnraveler {
       }
     }
 
+    int repThreshold = currentRepCmp;
     currentRepCmp += 1;
 
     List<Integer> offsets = new ArrayList<>();
@@ -176,50 +182,50 @@ public class V21ListUnraveler {
     // If offsets already has a trailing value from a previous page/unravel, pop it
     // (not needed in our merged-buffer case, but kept for parity with Rust)
 
+
     if (hasDef) {
       int readIdx = 0;
       int writeIdx = 0;
-      // Debug removed
       while (readIdx < repLevels.length) {
         short repVal = repLevels[readIdx];
         short defVal = defLevels[readIdx];
-        // Debug removed
+
         if (repVal != 0) {
-          // Compact: shift rep down by 1 so the next layer sees correct boundaries
+          // Same list element at this layer; keep for next layer
           repLevels[writeIdx] = (short) (repVal - 1);
           defLevels[writeIdx] = defVal;
           writeIdx++;
 
-          if (defVal == 0) {
-            // Valid list
+          if (defVal > maxLevel) {
+            // Masked by upper null; invisible at this rep level.
+            // Do NOT add offset, but keep in buffers for upper layers.
+
+          } else if (defVal == 0) {
+            // Valid list (Rust compatibility: def=0 is always valid at this layer)
             offsets.add(curlen);
             curlen += 1;
             validityList.add(true);
-            // Debug removed
-          } else if (defVal > maxLevel) {
-            // Masked by upper null; invisible at this rep level.
-            // Do NOT add offset, but keep in buffers for upper layers.
-            // Debug removed
+
           } else if (defVal == nullLevel || defVal > upperNull) {
             // Null list (or list masked by a null struct)
             offsets.add(curlen);
             validityList.add(false);
-            // Debug removed
+
           } else if (defVal == emptyLevel) {
             // Empty list
             offsets.add(curlen);
             validityList.add(true);
-            // Debug removed
+
           } else {
-            // New valid list starting with null item
+            // Valid list starting with null item
             offsets.add(curlen);
             curlen += 1;
             validityList.add(true);
-            // Debug removed
+
           }
         } else {
           curlen += 1;
-          // Debug removed
+
         }
         readIdx++;
       }
@@ -235,22 +241,25 @@ public class V21ListUnraveler {
         defLevels = newDef;
       }
     } else {
-      // No def levels: every rep != 0 is a new list, everything is valid
+      // No def levels: every rep != 0 is kept, everything is valid
       int oldOffsetsLen = offsets.size();
+      int writeIdx = 0;
       for (int i = 0; i < repLevels.length; i++) {
         short repVal = repLevels[i];
         if (repVal != 0) {
           offsets.add(curlen);
-          repLevels[i] = (short) (repVal - 1);
+          repLevels[writeIdx] = (short) (repVal - 1);
+          writeIdx++;
         }
         curlen += 1;
       }
       int numNewLists = offsets.size() - oldOffsetsLen;
       offsets.add(curlen);
-      // Truncate repLevels (all entries were kept, just shifted)
-      if (repLevels.length > 0) {
-        // In the no-def case, every entry is kept (shifted down by 1)
-        // Nothing to truncate
+      // Truncate repLevels
+      if (writeIdx < repLevels.length) {
+        short[] newRep = new short[writeIdx];
+        System.arraycopy(repLevels, 0, newRep, 0, writeIdx);
+        repLevels = newRep;
       }
       for (int i = 0; i < numNewLists; i++) {
         validityList.add(true);
@@ -274,6 +283,9 @@ public class V21ListUnraveler {
    * All rows have the same structure determined entirely by the remaining layers.
    */
   private UnravelResult unravelConstantLayer(int numRows) {
+    if (numRows < 0 || numRows > 1_000_000) {
+      numRows = 0;
+    }
     // Skip non-list layers (same as unravelOffsets)
     while (currentLayer < layers.size() && !isListLayer(layers.get(currentLayer))) {
       currentDefCmp += defLevelsForLayer(layers.get(currentLayer));
@@ -375,28 +387,6 @@ public class V21ListUnraveler {
       currentLayer++;
       currentDefCmp += defLevelsForLayer(currentLayerType);
       currentRepCmp += 1;
-
-      // Truncate rep/def exactly as unravelOffsets does for rep != 0 entries
-      if (repLevels.length > 0) {
-        int writeIdx = 0;
-        for (int j = 0; j < repLevels.length; j++) {
-          if (repLevels[j] != 0) {
-            repLevels[writeIdx] = (short) (repLevels[j] - 1);
-            if (defLevels.length > 0) {
-              defLevels[writeIdx] = defLevels[j];
-            }
-            writeIdx++;
-          }
-        }
-        if (writeIdx < repLevels.length) {
-          short[] newRep = new short[writeIdx];
-          short[] newDef = new short[writeIdx];
-          System.arraycopy(repLevels, 0, newRep, 0, writeIdx);
-          System.arraycopy(defLevels, 0, newDef, 0, writeIdx);
-          repLevels = newRep;
-          defLevels = newDef;
-        }
-      }
     }
   }
 
