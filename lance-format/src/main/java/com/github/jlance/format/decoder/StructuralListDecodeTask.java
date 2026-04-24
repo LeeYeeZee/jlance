@@ -3,7 +3,7 @@
 
 package com.github.jlance.format.decoder;
 
-import com.github.jlance.format.V21ListUnraveler;
+import com.github.jlance.format.RepDefUnraveler;
 import lance.encodings21.EncodingsV21.RepDefLayer;
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.vector.FieldVector;
@@ -19,16 +19,16 @@ import org.apache.arrow.vector.types.pojo.Field;
  * <p>This is the Java analog of the Rust {@code StructuralListDecodeTask} from the canonical
  * {@code lance-encoding} crate (see {@code lance-encoding/src/encodings/logical/list.rs}).
  *
- * <p>The task works in conjunction with {@link V21ListUnraveler} (the Java analog of Rust's
+ * <p>The task works in conjunction with {@link RepDefUnraveler} (the Java analog of Rust's
  * {@code RepDefUnraveler}). The unraveler consumes one list layer per call to
- * {@link V21ListUnraveler#unravelOffsets(int)}. The recursive order is <strong>bottom-up</strong>:
+ * {@link RepDefUnraveler#unravelOffsets(int)}. The recursive order is <strong>bottom-up</strong>:
  * the innermost child vector is decoded first, and then each outer layer wraps it. This matches
  * the Rust design where {@code child_task.decode()} is called before
  * {@code repdef.unravel_offsets()}.
  */
 public class StructuralListDecodeTask {
 
-  private final V21ListUnraveler unraveler;
+  private final RepDefUnraveler unraveler;
   private final FieldVector innerVec;
   private final Field field;
   private final int numRows;
@@ -44,7 +44,7 @@ public class StructuralListDecodeTask {
    * @param allocator  Arrow buffer allocator
    */
   public StructuralListDecodeTask(
-      V21ListUnraveler unraveler,
+      RepDefUnraveler unraveler,
       FieldVector innerVec,
       Field field,
       int numRows,
@@ -92,7 +92,7 @@ public class StructuralListDecodeTask {
       }
 
       // Now unravel the current list layer
-      V21ListUnraveler.UnravelResult result = unraveler.unravelOffsets(numRows);
+      RepDefUnraveler.UnravelResult result = unraveler.unravelOffsets(numRows);
 
       // Write offsets
       org.apache.arrow.memory.ArrowBuf offsetBuf = listVec.getOffsetBuffer();
@@ -139,7 +139,7 @@ public class StructuralListDecodeTask {
         childVec = innerVec;
       }
 
-      V21ListUnraveler.UnravelResult result = unraveler.unravelOffsets(numRows);
+      RepDefUnraveler.UnravelResult result = unraveler.unravelOffsets(numRows);
 
       // Write offsets (64-bit)
       org.apache.arrow.memory.ArrowBuf offsetBuf = listVec.getOffsetBuffer();

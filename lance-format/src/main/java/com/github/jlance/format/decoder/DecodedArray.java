@@ -22,7 +22,7 @@ public class DecodedArray {
   public final short[] repLevels;
   public final short[] defLevels;
   public final List<RepDefLayer> layers;
-  public final List<com.github.jlance.format.V21ListUnraveler.UnravelResult> listResults;
+  public final List<com.github.jlance.format.RepDefUnraveler.UnravelResult> listResults;
 
   /**
    * Creates a decoded array with rep/def state.
@@ -45,7 +45,7 @@ public class DecodedArray {
       short[] repLevels,
       short[] defLevels,
       List<RepDefLayer> layers,
-      List<com.github.jlance.format.V21ListUnraveler.UnravelResult> listResults) {
+      List<com.github.jlance.format.RepDefUnraveler.UnravelResult> listResults) {
     this.vector = vector;
     this.repLevels = repLevels;
     this.defLevels = defLevels;

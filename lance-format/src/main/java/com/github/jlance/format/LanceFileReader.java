@@ -309,7 +309,7 @@ public class LanceFileReader implements AutoCloseable {
       short[] parentRepLevels,
       short[] parentDefLevels,
       List<RepDefLayer> parentLayers,
-      java.util.List<V21ListUnraveler.UnravelResult> pendingListResults)
+      java.util.List<RepDefUnraveler.UnravelResult> pendingListResults)
       throws IOException {
     if (field.getType() instanceof ArrowType.Struct) {
       // V2.1+ struct: children are separate columns, struct itself does not consume
@@ -360,7 +360,7 @@ public class LanceFileReader implements AutoCloseable {
           }
           if (pendingListResults != null && !pendingListResults.isEmpty()) {
             // Consume the outermost pending list result (last in the list).
-            V21ListUnraveler.UnravelResult result = pendingListResults.remove(
+            RepDefUnraveler.UnravelResult result = pendingListResults.remove(
                 pendingListResults.size() - 1);
             int itemCount = result.offsets[result.offsets.length - 1];
             DecodedArray itemArray = readField(itemField, nextColIndex, footer, itemCount,
@@ -428,7 +428,7 @@ public class LanceFileReader implements AutoCloseable {
       short[] parentRepLevels,
       short[] parentDefLevels,
       List<RepDefLayer> parentLayers,
-      java.util.List<V21ListUnraveler.UnravelResult> pendingListResults)
+      java.util.List<RepDefUnraveler.UnravelResult> pendingListResults)
       throws IOException {
     StructVector struct = (StructVector) field.createVector(allocator);
     struct.setInitialCapacity(numRows);
@@ -615,19 +615,7 @@ public class LanceFileReader implements AutoCloseable {
         buf.get(data);
         buffers.add(data);
       }
-      try {
-        for (int i = 0; i < buffers.size(); i++) {
-          java.nio.file.Files.write(
-              java.nio.file.Path.of("C:/Users/22591/jlance/debug_buffer_" + i + ".bin"),
-              buffers.get(i));
-        }
-      } catch (Exception e) {
-        // ignore
-      }
       // page buffers consumed
-      for (int i = 0; i < buffers.size(); i++) {
-        // buffer size logged
-      }
       PageBufferStore store = new PageBufferStore(buffers);
 
       // Decode the offsets array (described by listEnc.getOffsets())
@@ -775,7 +763,7 @@ public class LanceFileReader implements AutoCloseable {
       short[] parentRepLevels,
       short[] parentDefLevels,
       List<RepDefLayer> parentLayers,
-      java.util.List<V21ListUnraveler.UnravelResult> pendingListResults)
+      java.util.List<RepDefUnraveler.UnravelResult> pendingListResults)
       throws IOException {
     if (field.getChildren().isEmpty()) {
       throw new IllegalStateException("List field has no children: " + field.getName());
@@ -993,30 +981,30 @@ public class LanceFileReader implements AutoCloseable {
       }
 
 
-      V21ListUnraveler unraveler;
+      RepDefUnraveler unraveler;
       if (hasParentRepDef) {
         // Parent rep/def has already been truncated by outer layers.
         // Start unraveling from the current list layer directly.
         int[] state = computeUnravelerStartState(layers, skipLayers);
-        unraveler = new V21ListUnraveler(
+        unraveler = new RepDefUnraveler(
             repLevels, defLevels, layers, state[0], state[1], state[2]);
       } else {
-        unraveler = new V21ListUnraveler(repLevels, defLevels, layers);
+        unraveler = new RepDefUnraveler(repLevels, defLevels, layers);
         if (skipLayers > 0) {
           unraveler.skipListLayers(skipLayers);
         }
       }
 
       // Multi-layer list unravel
-      java.util.List<V21ListUnraveler.UnravelResult> layerResults = new java.util.ArrayList<>();
+      java.util.List<RepDefUnraveler.UnravelResult> layerResults = new java.util.ArrayList<>();
       for (int i = 0; i < unravelCount && unraveler.hasMoreListLayers(); i++) {
-        V21ListUnraveler.UnravelResult result = unraveler.unravelOffsets(numRows);
+        RepDefUnraveler.UnravelResult result = unraveler.unravelOffsets(numRows);
 
         layerResults.add(result);
       }
 
       // For ConstantLayout nested lists, manually build any missing inner list layer(s)
-      // because V21ListUnraveler may only see the outer list layer(s).
+      // because RepDefUnraveler may only see the outer list layer(s).
       if (itemIsList && hasConstantLayout && !layerResults.isEmpty()) {
         int missingLayers = countListLayersDeep(field) - layerResults.size();
         for (int m = 0; m < missingLayers; m++) {
@@ -1025,7 +1013,7 @@ public class LanceFileReader implements AutoCloseable {
               : 0;
           int[] innerOffsets = new int[innerCount + 1];
           boolean[] innerValidity = new boolean[innerCount];
-          layerResults.add(0, new V21ListUnraveler.UnravelResult(innerOffsets, innerValidity));
+          layerResults.add(0, new RepDefUnraveler.UnravelResult(innerOffsets, innerValidity));
         }
       }
 
@@ -1037,7 +1025,7 @@ public class LanceFileReader implements AutoCloseable {
         // The first descendant leaf was already decoded into itemVectors.
         nextColIndex[0]++;
 
-        java.util.List<V21ListUnraveler.UnravelResult> outerToInner =
+        java.util.List<RepDefUnraveler.UnravelResult> outerToInner =
             new java.util.ArrayList<>(layerResults);
         java.util.Collections.reverse(outerToInner);
         currentVec = buildMixedNestedVector(
@@ -1177,12 +1165,12 @@ public class LanceFileReader implements AutoCloseable {
   /**
    * Recursively builds a nested list/struct tree from the inside out using pre-computed
    * list layer results.  {@code layerResults} must be in <strong>outer-to-inner</strong> order
-   * (the opposite of {@code V21ListUnraveler}'s natural order).
+   * (the opposite of {@code RepDefUnraveler}'s natural order).
    */
   private FieldVector buildMixedNestedVector(
       Field field,
       int layerIndex,
-      java.util.List<V21ListUnraveler.UnravelResult> layerResults,
+      java.util.List<RepDefUnraveler.UnravelResult> layerResults,
       java.util.List<FieldVector> itemVectors,
       Field innermostField,
       int[] nextColIndex,
@@ -1194,7 +1182,7 @@ public class LanceFileReader implements AutoCloseable {
       if (layerIndex >= layerResults.size()) {
         throw new IllegalStateException("Not enough layer results for field " + field.getName());
       }
-      V21ListUnraveler.UnravelResult result = layerResults.get(layerIndex);
+      RepDefUnraveler.UnravelResult result = layerResults.get(layerIndex);
       Field itemField = field.getChildren().get(0);
       int childNumRows = result.offsets[result.offsets.length - 1];
       FieldVector itemVec = buildMixedNestedVector(
@@ -1256,7 +1244,7 @@ public class LanceFileReader implements AutoCloseable {
 
   /**
    * Computes the initial state (currentLayer, currentDefCmp, currentRepCmp) for a
-   * V21ListUnraveler that should start at the list layer after skipping {@code skipLayers}
+   * RepDefUnraveler that should start at the list layer after skipping {@code skipLayers}
    * inner list layers.
    */
   private static int[] computeUnravelerStartState(List<RepDefLayer> layers, int skipLayers) {
@@ -1344,7 +1332,7 @@ public class LanceFileReader implements AutoCloseable {
   }
 
   /**
-   * Recursively builds a nested list vector using a V21ListUnraveler.
+   * Recursively builds a nested list vector using a RepDefUnraveler.
    *
    * <p>This replaces the previous hard-coded 2-layer implementation with a general
    * recursive approach that follows the Rust {@code lance-encoding} design.
@@ -1376,7 +1364,7 @@ public class LanceFileReader implements AutoCloseable {
   }
 
   /**
-   * Builds a single list layer from a pre-computed {@link V21ListUnraveler.UnravelResult}.
+   * Builds a single list layer from a pre-computed {@link RepDefUnraveler.UnravelResult}.
    *
    * @param childVec the already-built child vector (inner list or leaf values)
    * @param field    the Arrow field for this list layer
@@ -1387,10 +1375,10 @@ public class LanceFileReader implements AutoCloseable {
   private static FieldVector buildListVector(
       FieldVector childVec,
       Field field,
-      V21ListUnraveler.UnravelResult result,
+      RepDefUnraveler.UnravelResult result,
       BufferAllocator allocator) {
     int numRows = result.numLists;
-    System.out.println("buildListVector field=" + field.getName() + " numRows=" + numRows + " childClass=" + childVec.getClass().getSimpleName() + " childCount=" + childVec.getValueCount());
+    // buildListVector debug trace removed
     FieldVector vector = field.createVector(allocator);
     if (vector instanceof ListVector) {
       ListVector listVec = (ListVector) vector;
@@ -1455,7 +1443,7 @@ public class LanceFileReader implements AutoCloseable {
   }
 
   private static FieldVector buildRecursiveListVector(
-      V21ListUnraveler unraveler,
+      RepDefUnraveler unraveler,
       FieldVector innerVec,
       Field field,
       int numRows,

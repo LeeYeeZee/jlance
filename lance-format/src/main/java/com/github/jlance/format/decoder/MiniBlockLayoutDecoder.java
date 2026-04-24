@@ -46,16 +46,8 @@ public class MiniBlockLayoutDecoder implements PageLayoutDecoder {
     short[] repLevels = null;
     short[] defLevels = null;
     if (miniBlock.hasRepCompression() || hasRepDefLayers(layers)) {
-      try {
-        repLevels = extractRepetitionLevels(layout, numRows, store, allocator);
-      } catch (Exception e) {
-        // Ignore extraction failures for rep levels
-      }
-      try {
-        defLevels = extractDefinitionLevels(layout, numRows, store, allocator);
-      } catch (Exception e) {
-        // Ignore extraction failures for def levels
-      }
+      repLevels = extractRepetitionLevels(layout, numRows, store, allocator);
+      defLevels = extractDefinitionLevels(layout, numRows, store, allocator);
     }
 
     FieldVector vector = decode(layout, numRows, store, field, allocator);

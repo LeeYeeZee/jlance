@@ -21,11 +21,15 @@ import lance.encodings21.EncodingsV21.RepDefLayer;
  * <p>Layers are ordered <strong>inner-to-outer</strong> (same as the protobuf {@code layers}
  * field in {@code MiniBlockLayout} / {@code ConstantLayout}).
  */
-public class V21ListUnraveler {
+public class RepDefUnraveler {
 
   private short[] repLevels;
   private short[] defLevels;
   private final List<RepDefLayer> layers;
+
+  // Maps from definition level to the rep level at which that definition level is visible.
+  // Mirrors Rust RepDefUnraveler.levels_to_rep.
+  private final int[] levelsToRep;
 
   private int currentLayer;
   private int currentDefCmp;
@@ -53,11 +57,11 @@ public class V21ListUnraveler {
    * @param defLevels definition levels (may be empty)
    * @param layers    layer definitions, inner-to-outer
    */
-  public V21ListUnraveler(short[] repLevels, short[] defLevels, List<RepDefLayer> layers) {
+  public RepDefUnraveler(short[] repLevels, short[] defLevels, List<RepDefLayer> layers) {
     this(repLevels, defLevels, layers, 0, 0, 0);
   }
 
-  public V21ListUnraveler(short[] repLevels, short[] defLevels, List<RepDefLayer> layers,
+  public RepDefUnraveler(short[] repLevels, short[] defLevels, List<RepDefLayer> layers,
       int startLayer, int startDefCmp, int startRepCmp) {
     this.repLevels = repLevels != null ? repLevels.clone() : new short[0];
     this.defLevels = defLevels != null ? defLevels.clone() : new short[0];
@@ -65,6 +69,47 @@ public class V21ListUnraveler {
     this.currentLayer = startLayer;
     this.currentDefCmp = startDefCmp;
     this.currentRepCmp = startRepCmp;
+    this.levelsToRep = buildLevelsToRep(layers);
+  }
+
+  /**
+   * Builds the levels_to_rep lookup table, mirroring Rust RepDefUnraveler::new().
+   *
+   * <p>Each entry maps a definition level value to the rep level at which that
+   * definition level is visible.  Level 0 is always visible (maps to 0).
+   */
+  private static int[] buildLevelsToRep(List<RepDefLayer> layers) {
+    int capacity = 1; // level 0 always exists
+    for (RepDefLayer layer : layers) {
+      capacity += defLevelsForLayer(layer);
+    }
+    int[] table = new int[capacity];
+    int repCounter = 0;
+    table[0] = 0;
+    int idx = 1;
+    for (RepDefLayer layer : layers) {
+      switch (layer) {
+        case REPDEF_ALL_VALID_ITEM:
+        case REPDEF_ALL_VALID_LIST:
+          break;
+        case REPDEF_NULLABLE_ITEM:
+          table[idx++] = repCounter;
+          break;
+        case REPDEF_NULLABLE_LIST:
+        case REPDEF_EMPTYABLE_LIST:
+          repCounter += 1;
+          table[idx++] = repCounter;
+          break;
+        case REPDEF_NULL_AND_EMPTY_LIST:
+          repCounter += 1;
+          table[idx++] = repCounter;
+          table[idx++] = repCounter;
+          break;
+        default:
+          break;
+      }
+    }
+    return table;
   }
 
   /**
@@ -102,6 +147,18 @@ public class V21ListUnraveler {
       }
     }
     return count;
+  }
+
+  /**
+   * Returns the maximum number of lists that could be present at the current layer.
+   *
+   * <p>Mirrors Rust {@code RepDefUnraveler::max_lists}.
+   */
+  public int maxLists() {
+    if (repLevels != null && repLevels.length > 0) {
+      return repLevels.length;
+    }
+    return 0;
   }
 
   /**

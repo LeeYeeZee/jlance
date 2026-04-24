@@ -19,7 +19,7 @@ import org.junit.jupiter.api.Test;
 /**
  * Compatibility test for deeply nested lists (3+ layers).
  *
- * <p>These tests verify that the recursive V21ListUnraveler correctly handles
+ * <p>These tests verify that the recursive RepDefUnraveler correctly handles
  * arbitrary nesting depth, as required by the generalized nested list decoder.
  */
 public class Milestone44CompatTest {
