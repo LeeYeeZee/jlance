@@ -447,6 +447,40 @@ public class RepDefUnraveler {
     }
   }
 
+  /**
+   * Reconstructs the validity bitmap for the innermost primitive or struct
+   * after all list layers have been consumed.
+   *
+   * <p>Mirrors Rust {@code RepDefUnraveler::unravel_validity}.
+   *
+   * @return a boolean array where {@code true} = valid, {@code false} = null;
+   *         returns {@code null} if there are no nullable layers (all valid).
+   */
+  public boolean[] unravelValidity() {
+    // Skip remaining non-list layers
+    while (currentLayer < layers.size() && !isListLayer(layers.get(currentLayer))) {
+      RepDefLayer layer = layers.get(currentLayer);
+      if (layer == RepDefLayer.REPDEF_NULLABLE_ITEM) {
+        int nullLevel = currentDefCmp + 1;
+        boolean[] validity = new boolean[repLevels.length];
+        if (defLevels.length > 0) {
+          for (int i = 0; i < repLevels.length; i++) {
+            validity[i] = (defLevels[i] != nullLevel);
+          }
+        } else {
+          // No def levels means all valid (ConstantLayout optimization)
+          java.util.Arrays.fill(validity, true);
+        }
+        currentLayer++;
+        currentDefCmp += 1;
+        return validity;
+      }
+      // AllValidItem: nothing to do, just skip
+      currentLayer++;
+    }
+    return null;
+  }
+
   public short[] getRepLevels() {
     return repLevels;
   }
