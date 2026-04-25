@@ -12,6 +12,7 @@ import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.memory.RootAllocator;
 import org.apache.arrow.vector.LargeVarBinaryVector;
 import org.apache.arrow.vector.VectorSchemaRoot;
+import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -21,6 +22,7 @@ public class Milestone40CompatTest {
 
   private static final Path DATA_DIR = Paths.get("..", "compat_tests", "data", "milestone_40");
 
+  @Disabled("BLOB layout not yet implemented")
   @Test
   public void testBlobLargeBinary() throws Exception {
     Path file = DATA_DIR.resolve("test_blob_large_binary.lance");

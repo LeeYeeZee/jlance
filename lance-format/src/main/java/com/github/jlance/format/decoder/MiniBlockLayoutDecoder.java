@@ -452,6 +452,8 @@ public class MiniBlockLayoutDecoder implements PageLayoutDecoder {
 
     int vectorSize = hasListLayer ? (int) miniBlock.getNumItems() : numRows;
 
+    // Debug prints removed
+
     if (isVariableWidth) {
       FieldVector result = mergeVariableWidthVectors(miniBlockVectors, vectorSize, validity, field, allocator);
       for (FieldVector v : miniBlockVectors) {
@@ -581,6 +583,11 @@ public class MiniBlockLayoutDecoder implements PageLayoutDecoder {
     }
 
     result.setValueCount(vectorSize);
+
+    if ("desc".equals(field.getName())) {
+      // Debug prints removed
+    }
+
     return result;
   }
 

@@ -283,7 +283,7 @@ public class LanceFileReader implements AutoCloseable {
       int numRows,
       BufferAllocator allocator)
       throws IOException {
-    return readField(field, nextColIndex, footer, numRows, allocator, null, null, null, null);
+    return readField(field, nextColIndex, footer, numRows, allocator, null, null, null);
   }
 
   private DecodedArray readField(
@@ -295,21 +295,6 @@ public class LanceFileReader implements AutoCloseable {
       short[] parentRepLevels,
       short[] parentDefLevels,
       List<RepDefLayer> parentLayers)
-      throws IOException {
-    return readField(field, nextColIndex, footer, numRows, allocator,
-        parentRepLevels, parentDefLevels, parentLayers, null);
-  }
-
-  private DecodedArray readField(
-      Field field,
-      int[] nextColIndex,
-      LanceFileFooter footer,
-      int numRows,
-      BufferAllocator allocator,
-      short[] parentRepLevels,
-      short[] parentDefLevels,
-      List<RepDefLayer> parentLayers,
-      java.util.List<RepDefUnraveler.UnravelResult> pendingListResults)
       throws IOException {
     if (field.getType() instanceof ArrowType.Struct) {
       // V2.1+ struct: children are separate columns, struct itself does not consume
@@ -327,7 +312,7 @@ public class LanceFileReader implements AutoCloseable {
         }
       }
       return buildStructVector(field, nextColIndex, footer, numRows, allocator,
-          parentRepLevels, parentDefLevels, parentLayers, pendingListResults);
+          parentRepLevels, parentDefLevels, parentLayers);
     }
 
     if (field.getType() instanceof ArrowType.List || field.getType() instanceof ArrowType.LargeList) {
@@ -358,30 +343,24 @@ public class LanceFileReader implements AutoCloseable {
             FieldVector vector = decodeListColumn(cm, field, nextColIndex, footer, numRows, allocator);
             return new DecodedArray(vector);
           }
-          if (pendingListResults != null && !pendingListResults.isEmpty()) {
-            // Consume the outermost pending list result (last in the list).
-            RepDefUnraveler.UnravelResult result = pendingListResults.remove(
-                pendingListResults.size() - 1);
-            int itemCount = result.offsets[result.offsets.length - 1];
-            DecodedArray itemArray = readField(itemField, nextColIndex, footer, itemCount,
-                allocator, parentRepLevels, parentDefLevels, parentLayers, pendingListResults);
-            FieldVector listVec = buildListVector(
-                itemArray.vector, field, result, allocator);
-            return new DecodedArray(listVec, itemArray.repLevels, itemArray.defLevels,
-                itemArray.layers, itemArray.listResults);
+          // Recursive child read. Child reads the column (consumes nextColIndex)
+          // and returns DecodedArray with flat values + rep/def.
+          DecodedArray child = readField(itemField, nextColIndex, footer, numRows, allocator,
+              parentRepLevels, parentDefLevels, parentLayers);
+
+          // Unravel exactly ONE list layer from child's rep/def.
+          // Re-use the child's unraveler so that state (currentLayer, currentDefCmp,
+          // currentRepCmp) is preserved across recursive list boundaries.
+          RepDefUnraveler unraveler = child.unraveler;
+          if (unraveler == null) {
+            unraveler = new RepDefUnraveler(child.repLevels, child.defLevels, child.layers);
           }
-          DecodedArray array = decodeV21ListColumn(field, nextColIndex, footer, numRows, allocator,
-              parentRepLevels, parentDefLevels, parentLayers, pendingListResults);
-          if (array.listResults != null && !array.listResults.isEmpty()) {
-            FieldVector currentVec = array.vector;
-            for (int i = 0; i < array.listResults.size(); i++) {
-              int depthFromInner = array.listResults.size() - 1 - i;
-              Field currentField = getFieldAtDepth(field, depthFromInner);
-              currentVec = buildListVector(currentVec, currentField, array.listResults.get(i), allocator);
-            }
-            return new DecodedArray(currentVec, array.repLevels, array.defLevels, array.layers);
-          }
-          return array;
+          RepDefUnraveler.UnravelResult result = unraveler.unravelOffsets(numRows);
+
+          FieldVector listVec = buildListVector(child.vector, field, result, allocator);
+
+          // Return list vector + the same unraveler (now advanced by one layer).
+          return new DecodedArray(listVec, unraveler);
         }
       }
       ColumnMetadata cm = footer.getColumnMetadatas().get(nextColIndex[0]);
@@ -392,6 +371,12 @@ public class LanceFileReader implements AutoCloseable {
 
     ColumnMetadata cm = footer.getColumnMetadatas().get(nextColIndex[0]);
     nextColIndex[0]++;
+    if (footer.isV2_1OrLater()) {
+      PageLayout layout = PageDecoder.unpackPageLayout(cm.getPages(0).getEncoding());
+      if (layout != null) {
+        return decodeV21Column(cm, field, numRows, allocator);
+      }
+    }
     return decodePrimitiveColumn(cm, field, footer, numRows, allocator);
   }
 
@@ -402,7 +387,7 @@ public class LanceFileReader implements AutoCloseable {
       int numRows,
       BufferAllocator allocator)
       throws IOException {
-    return buildStructVector(field, nextColIndex, footer, numRows, allocator, null, null, null, null);
+    return buildStructVector(field, nextColIndex, footer, numRows, allocator, null, null, null);
   }
 
   private DecodedArray buildStructVector(
@@ -415,47 +400,18 @@ public class LanceFileReader implements AutoCloseable {
       short[] parentDefLevels,
       List<RepDefLayer> parentLayers)
       throws IOException {
-    return buildStructVector(field, nextColIndex, footer, numRows, allocator,
-        parentRepLevels, parentDefLevels, parentLayers, null);
-  }
-
-  private DecodedArray buildStructVector(
-      Field field,
-      int[] nextColIndex,
-      LanceFileFooter footer,
-      int numRows,
-      BufferAllocator allocator,
-      short[] parentRepLevels,
-      short[] parentDefLevels,
-      List<RepDefLayer> parentLayers,
-      java.util.List<RepDefUnraveler.UnravelResult> pendingListResults)
-      throws IOException {
-    StructVector struct = (StructVector) field.createVector(allocator);
-    struct.setInitialCapacity(numRows);
-    struct.allocateNew();
-    for (int i = 0; i < numRows; i++) {
-      org.apache.arrow.vector.BitVectorHelper.setValidityBit(struct.getValidityBuffer(), i, 1);
-    }
-
     boolean isV21 = footer.isV2_1OrLater();
     boolean isNullableStruct = isV21 && field.isNullable();
-    short[] structDefLevels = null;
-    int structLayerIndex = -1;
     List<DecodedArray> childArrays = new ArrayList<>();
+    List<Integer> childValueCounts = new ArrayList<>();
 
+    // Decode all children first so we know the actual value count.
     for (int ci = 0; ci < field.getChildren().size(); ci++) {
       Field childField = field.getChildren().get(ci);
       DecodedArray childArray = readField(childField, nextColIndex, footer, numRows, allocator,
-          parentRepLevels, parentDefLevels, parentLayers, pendingListResults);
+          parentRepLevels, parentDefLevels, parentLayers);
       childArrays.add(childArray);
-      FieldVector childVec = childArray.vector;
-      @SuppressWarnings("unchecked")
-      FieldVector slot =
-          struct.addOrGet(
-              childField.getName(), childField.getFieldType(),
-              (Class<? extends FieldVector>) childVec.getClass());
-      childVec.makeTransferPair(slot).transfer();
-      childVec.close();
+      childValueCounts.add(childArray.vector.getValueCount());
       // If the child consumed rep/def (e.g. a list), subsequent children should
       // receive the original un-truncated rep/def.  Re-clone for each child.
       if (parentRepLevels != null && childArray.repLevels != null
@@ -467,19 +423,50 @@ public class LanceFileReader implements AutoCloseable {
       }
     }
 
-    // V2.1+ nullable struct: derive validity from first child's rep/def levels.
+    int structValueCount = numRows;
+    if (!childValueCounts.isEmpty()) {
+      structValueCount = childValueCounts.get(0);
+    }
+
+    // Allocate struct with the correct capacity.  We do this AFTER children are
+    // decoded so that we know the real value count (e.g. a struct inside a list
+    // may have more values than numRows).
+    StructVector struct = (StructVector) field.createVector(allocator);
+    struct.setInitialCapacity(structValueCount);
+    struct.allocateNew();
+    for (int i = 0; i < structValueCount; i++) {
+      org.apache.arrow.vector.BitVectorHelper.setValidityBit(struct.getValidityBuffer(), i, 1);
+    }
+
+    // Transfer decoded children into the struct.
+    for (int ci = 0; ci < field.getChildren().size(); ci++) {
+      Field childField = field.getChildren().get(ci);
+      FieldVector childVec = childArrays.get(ci).vector;
+      @SuppressWarnings("unchecked")
+      FieldVector slot =
+          struct.addOrGet(
+              childField.getName(), childField.getFieldType(),
+              (Class<? extends FieldVector>) childVec.getClass());
+      childVec.makeTransferPair(slot).transfer();
+      childVec.close();
+    }
+
+    // V2.1+ nullable struct: derive validity from first child's ORIGINAL rep/def levels.
+    // We must use the pre-truncated levels because struct nullability is orthogonal to
+    // any list layers that the child may have consumed.
     if (isNullableStruct && !childArrays.isEmpty()) {
       DecodedArray firstChild = childArrays.get(0);
-      if (firstChild.defLevels != null && firstChild.defLevels.length > 0
-          && firstChild.layers != null) {
-        short[] def = firstChild.defLevels;
-        int nullStructLevel = computeOuterNullItemLevel(firstChild.layers);
+      RepDefUnraveler childUnraveler = firstChild.unraveler;
+      short[] def = childUnraveler != null ? childUnraveler.getOriginalDefLevels() : firstChild.defLevels;
+      short[] rep = childUnraveler != null ? childUnraveler.getOriginalRepLevels() : firstChild.repLevels;
+      List<RepDefLayer> layers = childUnraveler != null ? childUnraveler.getLayers() : firstChild.layers;
+      if (def != null && def.length > 0 && layers != null) {
+        int nullStructLevel = computeOuterNullItemLevel(layers);
         if (nullStructLevel >= 0) {
-          if (firstChild.repLevels != null && firstChild.repLevels.length > 0) {
+          if (rep != null && rep.length > 0) {
             // List child: rep > 0 marks a new row.  Check the first entry of each row.
-            short[] rep = firstChild.repLevels;
             int entryIdx = 0;
-            for (int row = 0; row < numRows && entryIdx < rep.length; row++) {
+            for (int row = 0; row < structValueCount && entryIdx < rep.length; row++) {
               boolean structNull = (def[entryIdx] == nullStructLevel);
               org.apache.arrow.vector.BitVectorHelper.setValidityBit(
                   struct.getValidityBuffer(), row, structNull ? 0 : 1);
@@ -491,7 +478,7 @@ public class LanceFileReader implements AutoCloseable {
             }
           } else {
             // Primitive child (no list layer)
-            for (int i = 0; i < numRows && i < def.length; i++) {
+            for (int i = 0; i < structValueCount && i < def.length; i++) {
               boolean structNull = (def[i] == nullStructLevel);
               org.apache.arrow.vector.BitVectorHelper.setValidityBit(
                   struct.getValidityBuffer(), i, structNull ? 0 : 1);
@@ -501,7 +488,12 @@ public class LanceFileReader implements AutoCloseable {
       }
     }
 
-    struct.setValueCount(numRows);
+    struct.setValueCount(structValueCount);
+    // Propagate the first child's unraveler upward so that an enclosing list layer
+    // can continue consuming rep/def from the correct state.
+    if (!childArrays.isEmpty() && childArrays.get(0).unraveler != null) {
+      return new DecodedArray(struct, childArrays.get(0).unraveler);
+    }
     return new DecodedArray(struct);
   }
 
@@ -732,66 +724,29 @@ public class LanceFileReader implements AutoCloseable {
    * carries the rep/def for this list (and any inner lists).  Struct items are handled
    * by recursively reading child columns.
    */
-  private DecodedArray decodeV21ListColumn(
-      Field field,
-      int[] nextColIndex,
-      LanceFileFooter footer,
-      int numRows,
-      BufferAllocator allocator)
+  /**
+   * Decodes a V2.1+ column by reading all pages, merging rep/def levels, and decoding
+   * leaf values using the correct item count per page.
+   *
+   * <p>This is the Java equivalent of Rust's primitive decoder combined with the
+   * page-reading logic.  It does <strong>not</strong> build any list layers — callers
+   * (e.g. {@code readField} for a list field) must unravel list layers themselves.
+   *
+   * @param cm column metadata (pages, encodings, etc.)
+   * @param field the innermost Arrow field to decode into
+   * @param numRows number of rows (used for rep/def extraction; values are decoded
+   *                with the correct item count from the page layout)
+   * @param allocator Arrow buffer allocator
+   * @return decoded array with leaf values + merged rep/def + deepest layer stack
+   */
+  private DecodedArray decodeV21Column(
+      ColumnMetadata cm, Field field, int numRows, BufferAllocator allocator)
       throws IOException {
-    return decodeV21ListColumn(field, nextColIndex, footer, numRows, allocator, null, null, null, null);
-  }
-
-  private DecodedArray decodeV21ListColumn(
-      Field field,
-      int[] nextColIndex,
-      LanceFileFooter footer,
-      int numRows,
-      BufferAllocator allocator,
-      short[] parentRepLevels,
-      short[] parentDefLevels,
-      List<RepDefLayer> parentLayers)
-      throws IOException {
-    return decodeV21ListColumn(field, nextColIndex, footer, numRows, allocator,
-        parentRepLevels, parentDefLevels, parentLayers, null);
-  }
-
-  private DecodedArray decodeV21ListColumn(
-      Field field,
-      int[] nextColIndex,
-      LanceFileFooter footer,
-      int numRows,
-      BufferAllocator allocator,
-      short[] parentRepLevels,
-      short[] parentDefLevels,
-      List<RepDefLayer> parentLayers,
-      java.util.List<RepDefUnraveler.UnravelResult> pendingListResults)
-      throws IOException {
-    if (field.getChildren().isEmpty()) {
-      throw new IllegalStateException("List field has no children: " + field.getName());
-    }
-    Field itemField = field.getChildren().get(0);
-
-    // In V2.1 the list does not consume a column.  The first child column
-    // (or descendant leaf column) contains the rep/def levels.
-    ColumnMetadata cm = footer.getColumnMetadatas().get(nextColIndex[0]);
-    Field innermostField = getInnermostField(itemField);
-
-
-    boolean hasParentRepDef = parentRepLevels != null;
 
     // Accumulate rep/def levels and item vectors across all pages.
     List<short[]> allRepLevels = new ArrayList<>();
     List<short[]> allDefLevels = new ArrayList<>();
     List<FieldVector> itemVectors = new ArrayList<>();
-
-    if (hasParentRepDef) {
-      // Use parent's already-truncated rep/def instead of re-reading from file.
-      allRepLevels.add(parentRepLevels.clone());
-      if (parentDefLevels != null) {
-        allDefLevels.add(parentDefLevels.clone());
-      }
-    }
 
     for (ColumnMetadata.Page page : cm.getPagesList()) {
       int pageRows = (int) page.getLength();
@@ -806,72 +761,63 @@ public class LanceFileReader implements AutoCloseable {
         buf.get(data);
         buffers.add(data);
       }
-      // page buffers read
       PageBufferStore store = new PageBufferStore(buffers);
       PageLayout layout = PageDecoder.unpackPageLayout(page.getEncoding());
       if (layout == null) {
-        throw new IllegalStateException("Expected PageLayout for V2.1 list column");
+        throw new IllegalStateException("Expected PageLayout for V2.1 column");
       }
 
       short[] repLevels = null;
       short[] defLevels = null;
-      int itemCount = 0;
-      List<RepDefLayer> pageLayers = null;
       FieldVector itemVec = null;
 
       if (layout.hasMiniBlockLayout()) {
         var miniBlock = layout.getMiniBlockLayout();
 
-        if (!hasParentRepDef) {
-          repLevels = MiniBlockLayoutDecoder.extractRepetitionLevels(
-              layout, pageRows, store, allocator);
-          defLevels = MiniBlockLayoutDecoder.extractDefinitionLevels(
-              layout, pageRows, store, allocator);
-          allRepLevels.add(repLevels != null ? repLevels : new short[0]);
-          allDefLevels.add(defLevels != null ? defLevels : new short[0]);
-        }
-        pageLayers = miniBlock.getLayersList();
+        repLevels = MiniBlockLayoutDecoder.extractRepetitionLevels(
+            layout, pageRows, store, allocator);
+        defLevels = MiniBlockLayoutDecoder.extractDefinitionLevels(
+            layout, pageRows, store, allocator);
+        allRepLevels.add(repLevels != null ? repLevels : new short[0]);
+        allDefLevels.add(defLevels != null ? defLevels : new short[0]);
 
         store.resetBufferIndex();
         MiniBlockLayoutDecoder decoder = new MiniBlockLayoutDecoder();
         int pageNumItems = (int) miniBlock.getNumItems();
-        itemVec = decoder.decode(layout, pageNumItems, store, innermostField, allocator);
+        itemVec = decoder.decode(layout, pageNumItems, store, field, allocator);
       } else if (layout.hasConstantLayout()) {
         var constantLayout = layout.getConstantLayout();
-        pageLayers = constantLayout.getLayersList();
+        List<RepDefLayer> pageLayers = constantLayout.getLayersList();
 
         boolean pageHasListLayer = pageLayers.stream().anyMatch(l -> isListLayer(l));
-        if (!hasParentRepDef) {
-          if (pageHasListLayer) {
-            if (store.getCurrentBufferIndex() < store.getBufferCount()) {
-              byte[] repBuffer = store.takeNextBuffer();
-              int numRep = repBuffer.length / 2;
-              repLevels = new short[numRep];
-              ByteBuffer repBB = ByteBuffer.wrap(repBuffer).order(ByteOrder.LITTLE_ENDIAN);
-              repBB.asShortBuffer().get(repLevels);
-            }
-            if (store.getCurrentBufferIndex() < store.getBufferCount()) {
-              byte[] defBuffer = store.takeNextBuffer();
-              int numDef = defBuffer.length / 2;
-              defLevels = new short[numDef];
-              ByteBuffer defBB = ByteBuffer.wrap(defBuffer).order(ByteOrder.LITTLE_ENDIAN);
-              defBB.asShortBuffer().get(defLevels);
-            }
+        if (pageHasListLayer) {
+          if (store.getCurrentBufferIndex() < store.getBufferCount()) {
+            byte[] repBuffer = store.takeNextBuffer();
+            int numRep = repBuffer.length / 2;
+            repLevels = new short[numRep];
+            ByteBuffer repBB = ByteBuffer.wrap(repBuffer).order(ByteOrder.LITTLE_ENDIAN);
+            repBB.asShortBuffer().get(repLevels);
           }
-          allRepLevels.add(repLevels != null ? repLevels : new short[0]);
-          allDefLevels.add(defLevels != null ? defLevels : new short[0]);
+          if (store.getCurrentBufferIndex() < store.getBufferCount()) {
+            byte[] defBuffer = store.takeNextBuffer();
+            int numDef = defBuffer.length / 2;
+            defLevels = new short[numDef];
+            ByteBuffer defBB = ByteBuffer.wrap(defBuffer).order(ByteOrder.LITTLE_ENDIAN);
+            defBB.asShortBuffer().get(defLevels);
+          }
         }
+        allRepLevels.add(repLevels != null ? repLevels : new short[0]);
+        allDefLevels.add(defLevels != null ? defLevels : new short[0]);
 
-        short[] currentRep = hasParentRepDef ? allRepLevels.get(0) : repLevels;
         int pageItemCount = pageHasListLayer
-            ? (currentRep != null ? currentRep.length : 0)
+            ? (repLevels != null ? repLevels.length : 0)
             : pageRows;
 
         ConstantLayoutDecoder decoder = new ConstantLayoutDecoder();
-        itemVec = decoder.decode(layout, pageItemCount, store, innermostField, allocator);
+        itemVec = decoder.decode(layout, pageItemCount, store, field, allocator);
       } else {
         throw new UnsupportedOperationException(
-            "Unsupported V2.1 list layout: " + layout.getLayoutCase());
+            "Unsupported V2.1 layout: " + layout.getLayoutCase());
       }
 
       if (itemVec != null) {
@@ -883,193 +829,36 @@ public class LanceFileReader implements AutoCloseable {
     short[] repLevels = mergeShortArrays(allRepLevels);
     short[] defLevels = mergeShortArrays(allDefLevels);
 
-    List<RepDefLayer> layers;
-    if (hasParentRepDef) {
-      layers = parentLayers;
-    } else {
-      List<ColumnMetadata.Page> pages = cm.getPagesList();
-      List<RepDefLayer> deepestLayers = java.util.Collections.emptyList();
-      int maxListLayers = -1;
-      for (ColumnMetadata.Page page : pages) {
-        if (page.getEncoding().hasDirect()) {
-          PageLayout layout = PageDecoder.unpackPageLayout(page.getEncoding());
-          List<RepDefLayer> candidate = java.util.Collections.emptyList();
-          if (layout != null && layout.hasMiniBlockLayout()) {
-            candidate = layout.getMiniBlockLayout().getLayersList();
-          } else if (layout != null && layout.hasConstantLayout()) {
-            candidate = layout.getConstantLayout().getLayersList();
-          }
-          int listLayerCount = 0;
-          for (RepDefLayer layer : candidate) {
-            if (isListLayer(layer)) {
-              listLayerCount++;
-            }
-          }
-          if (listLayerCount > maxListLayers) {
-            maxListLayers = listLayerCount;
-            deepestLayers = candidate;
+    List<ColumnMetadata.Page> pages = cm.getPagesList();
+    List<RepDefLayer> deepestLayers = java.util.Collections.emptyList();
+    int maxListLayers = -1;
+    for (ColumnMetadata.Page page : pages) {
+      if (page.getEncoding().hasDirect()) {
+        PageLayout layout = PageDecoder.unpackPageLayout(page.getEncoding());
+        List<RepDefLayer> candidate = java.util.Collections.emptyList();
+        if (layout != null && layout.hasMiniBlockLayout()) {
+          candidate = layout.getMiniBlockLayout().getLayersList();
+        } else if (layout != null && layout.hasConstantLayout()) {
+          candidate = layout.getConstantLayout().getLayersList();
+        }
+        int listLayerCount = 0;
+        for (RepDefLayer layer : candidate) {
+          if (isListLayer(layer)) {
+            listLayerCount++;
           }
         }
-      }
-      layers = deepestLayers;
-    }
-
-    int listLayerCount = 0;
-    for (RepDefLayer layer : layers) {
-      if (isListLayer(layer)) {
-        listLayerCount++;
-      }
-    }
-
-    boolean itemIsList = itemField.getType() instanceof ArrowType.List
-        || itemField.getType() instanceof ArrowType.LargeList;
-
-    if (listLayerCount > 1 || itemField.getType() instanceof ArrowType.Struct || itemIsList) {
-      int skipLayers = countListLayersDeep(itemField);
-      int unravelCount = countListLayersDeep(field) - countListLayersDeep(itemField);
-
-      // For nested list items (non-struct), unravel all list layers here.
-      if (itemIsList) {
-        unravelCount = countListLayersDeep(field);
-        skipLayers = 0;
-      }
-
-      // For struct items, unravel all list layers in this call and pass the
-      // layer results down via DecodedArray.listResults.
-      if (itemField.getType() instanceof ArrowType.Struct) {
-        unravelCount = countListLayersDeep(field);
-        skipLayers = 0;
-      }
-
-
-      RepDefUnraveler unraveler;
-      if (hasParentRepDef) {
-        // Parent rep/def has already been truncated by outer layers.
-        // Start unraveling from the current list layer directly.
-        int[] state = computeUnravelerStartState(layers, skipLayers);
-        unraveler = new RepDefUnraveler(
-            repLevels, defLevels, layers, state[0], state[1], state[2]);
-      } else {
-        unraveler = new RepDefUnraveler(repLevels, defLevels, layers);
-        if (skipLayers > 0) {
-          unraveler.skipListLayers(skipLayers);
+        if (listLayerCount > maxListLayers) {
+          maxListLayers = listLayerCount;
+          deepestLayers = candidate;
         }
       }
-
-      // Multi-layer list unravel
-      java.util.List<RepDefUnraveler.UnravelResult> layerResults = new java.util.ArrayList<>();
-      for (int i = 0; i < unravelCount && unraveler.hasMoreListLayers(); i++) {
-        RepDefUnraveler.UnravelResult result = unraveler.unravelOffsets(numRows);
-
-        layerResults.add(result);
-      }
-
-      // For ConstantLayout nested lists, manually build any missing inner list layer(s)
-      // because RepDefUnraveler may only see the outer list layer(s).
-      if (itemIsList && !layerResults.isEmpty()) {
-        int missingLayers = countListLayersDeep(field) - layerResults.size();
-        for (int m = 0; m < missingLayers; m++) {
-          int innerCount = (m == 0)
-              ? layerResults.get(0).offsets[layerResults.get(0).offsets.length - 1]
-              : 0;
-          int[] innerOffsets = new int[innerCount + 1];
-          boolean[] innerValidity = new boolean[innerCount];
-          layerResults.add(0, new RepDefUnraveler.UnravelResult(innerOffsets, innerValidity));
-        }
-      }
-
-      FieldVector currentVec;
-      if (itemField.getType() instanceof ArrowType.Struct) {
-        // Mixed list/struct nesting: build the entire tree inside-out using the
-        // pre-computed layer results.  layerResults is inner-to-outer; reverse it
-        // so that buildMixedNestedVector can walk from the outside in.
-        // The first descendant leaf was already decoded into itemVectors.
-        nextColIndex[0]++;
-
-        java.util.List<RepDefUnraveler.UnravelResult> outerToInner =
-            new java.util.ArrayList<>(layerResults);
-        java.util.Collections.reverse(outerToInner);
-        currentVec = buildMixedNestedVector(
-            field, 0, outerToInner, itemVectors, innermostField,
-            nextColIndex, footer, allocator, numRows);
-        return new DecodedArray(currentVec, unraveler.getRepLevels(), unraveler.getDefLevels(), layers);
-      } else {
-        nextColIndex[0]++;
-        currentVec = mergeFieldVectors(itemVectors, itemField, allocator);
-      }
-
-      for (int i = 0; i < layerResults.size(); i++) {
-        int depthFromInner = layerResults.size() - 1 - i;
-        Field currentField = getFieldAtDepth(field, depthFromInner);
-        currentVec = buildListVector(currentVec, currentField, layerResults.get(i), allocator);
-      }
-      return new DecodedArray(currentVec, unraveler.getRepLevels(), unraveler.getDefLevels(), layers);
     }
+    List<RepDefLayer> layers = deepestLayers;
 
-    // Single-layer list with primitive item (unified via RepDefUnraveler)
-    nextColIndex[0]++;
-    FieldVector itemVec = mergeFieldVectors(itemVectors, innermostField, allocator);
+    // Merge item vectors into a single vector.
+    FieldVector itemVec = mergeFieldVectors(itemVectors, field, allocator);
 
-    RepDefUnraveler unraveler = new RepDefUnraveler(repLevels, defLevels, layers);
-    RepDefUnraveler.UnravelResult result = unraveler.unravelOffsets(numRows);
-
-    FieldVector listVec = buildListVector(itemVec, field, result, allocator);
-    // Return the original (un-truncated) rep/def levels so that upstream
-    // struct validity derivation (buildStructVector) sees the full buffers.
-    return new DecodedArray(listVec, repLevels, defLevels, layers);
-  }
-
-  /**
-   * Recursively builds a nested list/struct tree from the inside out using pre-computed
-   * list layer results.  {@code layerResults} must be in <strong>outer-to-inner</strong> order
-   * (the opposite of {@code RepDefUnraveler}'s natural order).
-   */
-  private FieldVector buildMixedNestedVector(
-      Field field,
-      int layerIndex,
-      java.util.List<RepDefUnraveler.UnravelResult> layerResults,
-      java.util.List<FieldVector> itemVectors,
-      Field innermostField,
-      int[] nextColIndex,
-      LanceFileFooter footer,
-      BufferAllocator allocator,
-      int numRows)
-      throws IOException {
-    if (field.getType() instanceof ArrowType.List || field.getType() instanceof ArrowType.LargeList) {
-      if (layerIndex >= layerResults.size()) {
-        throw new IllegalStateException("Not enough layer results for field " + field.getName());
-      }
-      RepDefUnraveler.UnravelResult result = layerResults.get(layerIndex);
-      Field itemField = field.getChildren().get(0);
-      int childNumRows = result.offsets[result.offsets.length - 1];
-      FieldVector itemVec = buildMixedNestedVector(
-          itemField, layerIndex + 1, layerResults, itemVectors, innermostField,
-          nextColIndex, footer, allocator, childNumRows);
-      return buildListVector(itemVec, field, result, allocator);
-    }
-
-    if (field.getType() instanceof ArrowType.Struct) {
-      java.util.List<FieldVector> childVecs = new java.util.ArrayList<>();
-      int structNumRows = -1;
-      for (Field childField : field.getChildren()) {
-        FieldVector childVec = buildMixedNestedVector(
-            childField, layerIndex, layerResults, itemVectors, innermostField,
-            nextColIndex, footer, allocator, numRows);
-        if (structNumRows == -1) {
-          structNumRows = childVec.getValueCount();
-        }
-        childVecs.add(childVec);
-      }
-      return buildStructWithChildren(field, childVecs, structNumRows, allocator);
-    }
-
-    // Primitive leaf
-    if (!itemVectors.isEmpty() && field.equals(innermostField)) {
-      return mergeFieldVectors(itemVectors, field, allocator);
-    }
-    ColumnMetadata cm = footer.getColumnMetadatas().get(nextColIndex[0]);
-    nextColIndex[0]++;
-    return decodePrimitiveColumn(cm, field, footer, numRows, allocator).vector;
+    return new DecodedArray(itemVec, repLevels, defLevels, layers);
   }
 
   private static StructVector buildStructWithChildren(
@@ -1097,50 +886,6 @@ public class LanceFileReader implements AutoCloseable {
     }
     struct.setValueCount(numRows);
     return struct;
-  }
-
-  /**
-   * Computes the initial state (currentLayer, currentDefCmp, currentRepCmp) for a
-   * RepDefUnraveler that should start at the list layer after skipping {@code skipLayers}
-   * inner list layers.
-   */
-  private static int[] computeUnravelerStartState(List<RepDefLayer> layers, int skipLayers) {
-    int currentLayer = 0;
-    int currentDefCmp = 0;
-    int currentRepCmp = 0;
-    int skipped = 0;
-    for (RepDefLayer layer : layers) {
-      if (isListLayer(layer)) {
-        if (skipped < skipLayers) {
-          skipped++;
-          currentDefCmp += defLevelsForLayer(layer);
-          currentLayer++;
-          continue;
-        }
-        break;
-      }
-      currentDefCmp += defLevelsForLayer(layer);
-      currentLayer++;
-    }
-    // currentRepCmp stays 0 because parent rep/def has already had rep levels
-    // decremented by outer unravel calls.
-    return new int[] {currentLayer, currentDefCmp, currentRepCmp};
-  }
-
-  private static int defLevelsForLayer(RepDefLayer layer) {
-    switch (layer) {
-      case REPDEF_ALL_VALID_ITEM:
-      case REPDEF_ALL_VALID_LIST:
-        return 0;
-      case REPDEF_NULLABLE_ITEM:
-      case REPDEF_NULLABLE_LIST:
-      case REPDEF_EMPTYABLE_LIST:
-        return 1;
-      case REPDEF_NULL_AND_EMPTY_LIST:
-        return 2;
-      default:
-        return 0;
-    }
   }
 
   /**
@@ -1189,38 +934,6 @@ public class LanceFileReader implements AutoCloseable {
   }
 
   /**
-   * Recursively builds a nested list vector using a RepDefUnraveler.
-   *
-   * <p>This replaces the previous hard-coded 2-layer implementation with a general
-   * recursive approach that follows the Rust {@code lance-encoding} design.
-   */
-  /**
-   * Returns the field at the given depth from the outermost list layer.
-   *
-   * <p>For {@code list<list<list<int>>>}:
-   * <ul>
-   *   <li>depth 0 鈫?{@code list<list<list<int>>>}</li>
-   *   <li>depth 1 鈫?{@code list<list<int>>}</li>
-   *   <li>depth 2 鈫?{@code list<int>}</li>
-   * </ul>
-   */
-  private static Field getFieldAtDepth(Field rootField, int depth) {
-    Field current = rootField;
-    for (int i = 0; i < depth; i++) {
-      if (current.getChildren().isEmpty()) {
-        break;
-      }
-      ArrowType type = current.getType();
-      if (type instanceof ArrowType.List || type instanceof ArrowType.LargeList) {
-        current = current.getChildren().get(0);
-      } else {
-        break;
-      }
-    }
-    return current;
-  }
-
-  /**
    * Builds a single list layer from a pre-computed {@link RepDefUnraveler.UnravelResult}.
    *
    * @param childVec the already-built child vector (inner list or leaf values)
@@ -1264,7 +977,11 @@ public class LanceFileReader implements AutoCloseable {
       Field childField = field.getChildren().get(0);
       org.apache.arrow.vector.ValueVector dataVec =
           listVec.addOrGetVector(childField.getFieldType()).getVector();
-      childVec.makeTransferPair(dataVec).transfer();
+      if (childVec instanceof StructVector && dataVec instanceof StructVector) {
+        deepCopyStructVector((StructVector) childVec, (StructVector) dataVec);
+      } else {
+        childVec.makeTransferPair(dataVec).transfer();
+      }
       childVec.close();
 
       listVec.setLastSet(numRows - 1);
@@ -1299,7 +1016,11 @@ public class LanceFileReader implements AutoCloseable {
       Field childField = field.getChildren().get(0);
       org.apache.arrow.vector.ValueVector dataVec =
           listVec.addOrGetVector(childField.getFieldType()).getVector();
-      childVec.makeTransferPair(dataVec).transfer();
+      if (childVec instanceof StructVector && dataVec instanceof StructVector) {
+        deepCopyStructVector((StructVector) childVec, (StructVector) dataVec);
+      } else {
+        childVec.makeTransferPair(dataVec).transfer();
+      }
       childVec.close();
 
       listVec.setLastSet(numRows - 1);
@@ -1441,6 +1162,103 @@ public class LanceFileReader implements AutoCloseable {
         || layer == lance.encodings21.EncodingsV21.RepDefLayer.REPDEF_NULLABLE_LIST
         || layer == lance.encodings21.EncodingsV21.RepDefLayer.REPDEF_EMPTYABLE_LIST
         || layer == lance.encodings21.EncodingsV21.RepDefLayer.REPDEF_NULL_AND_EMPTY_LIST;
+  }
+
+  /**
+   * Deep-copies one {@link FieldVector} to another.
+   *
+   * <p>For primitive vectors this delegates to {@code copyFromSafe}. For complex
+   * vectors (struct, list, large-list) it recursively copies children so that the
+   * destination is a fully independent clone of the source.
+   */
+  private static void deepCopyVector(FieldVector src, FieldVector dest) {
+    if (src instanceof StructVector && dest instanceof StructVector) {
+      deepCopyStructVector((StructVector) src, (StructVector) dest);
+    } else if (src instanceof ListVector && dest instanceof ListVector) {
+      deepCopyListVector((ListVector) src, (ListVector) dest);
+    } else if (src instanceof LargeListVector && dest instanceof LargeListVector) {
+      deepCopyLargeListVector((LargeListVector) src, (LargeListVector) dest);
+    } else {
+      dest.allocateNew();
+      for (int i = 0; i < src.getValueCount(); i++) {
+        if (src.isNull(i)) {
+          dest.setNull(i);
+        } else {
+          dest.copyFromSafe(i, i, src);
+        }
+      }
+      dest.setValueCount(src.getValueCount());
+    }
+  }
+
+  private static void deepCopyStructVector(StructVector src, StructVector dest) {
+    int valueCount = src.getValueCount();
+    dest.allocateNew();
+    for (int i = 0; i < valueCount; i++) {
+      if (src.isNull(i)) {
+        dest.setNull(i);
+      } else {
+        org.apache.arrow.vector.BitVectorHelper.setValidityBit(
+            dest.getValidityBuffer(), i, 1);
+      }
+    }
+    dest.setValueCount(valueCount);
+
+    for (org.apache.arrow.vector.types.pojo.Field childField : src.getField().getChildren()) {
+      String name = childField.getName();
+      FieldVector srcChild = src.getChild(name);
+      if (srcChild == null) {
+        continue;
+      }
+      @SuppressWarnings("unchecked")
+      FieldVector destChild = dest.addOrGet(
+          name, childField.getFieldType(),
+          (Class<? extends FieldVector>) srcChild.getClass());
+      deepCopyVector(srcChild, destChild);
+    }
+  }
+
+  private static void deepCopyListVector(ListVector src, ListVector dest) {
+    int valueCount = src.getValueCount();
+    dest.allocateNew();
+    for (int i = 0; i < valueCount; i++) {
+      if (src.isNull(i)) {
+        dest.setNull(i);
+      } else {
+        dest.setNotNull(i);
+      }
+    }
+    // Copy offsets (valueCount + 1 entries)
+    for (int i = 0; i <= valueCount; i++) {
+      dest.getOffsetBuffer().setInt(i * 4, src.getOffsetBuffer().getInt(i * 4));
+    }
+    dest.setLastSet(valueCount - 1);
+    dest.setValueCount(valueCount);
+
+    FieldVector srcData = src.getDataVector();
+    FieldVector destData = dest.getDataVector();
+    deepCopyVector(srcData, destData);
+  }
+
+  private static void deepCopyLargeListVector(LargeListVector src, LargeListVector dest) {
+    int valueCount = src.getValueCount();
+    dest.allocateNew();
+    for (int i = 0; i < valueCount; i++) {
+      if (src.isNull(i)) {
+        dest.setNull(i);
+      } else {
+        dest.setNotNull(i);
+      }
+    }
+    for (int i = 0; i <= valueCount; i++) {
+      dest.getOffsetBuffer().setLong(i * 8, src.getOffsetBuffer().getLong(i * 8));
+    }
+    dest.setLastSet(valueCount - 1);
+    dest.setValueCount(valueCount);
+
+    FieldVector srcData = src.getDataVector();
+    FieldVector destData = dest.getDataVector();
+    deepCopyVector(srcData, destData);
   }
 
   /**

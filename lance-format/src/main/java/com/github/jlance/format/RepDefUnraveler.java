@@ -25,6 +25,8 @@ public class RepDefUnraveler {
 
   private short[] repLevels;
   private short[] defLevels;
+  private final short[] originalRepLevels;
+  private final short[] originalDefLevels;
   private final List<RepDefLayer> layers;
   private final int numItems;
 
@@ -68,6 +70,8 @@ public class RepDefUnraveler {
 
   public RepDefUnraveler(short[] repLevels, short[] defLevels, List<RepDefLayer> layers,
       int numItems, int startLayer, int startDefCmp, int startRepCmp) {
+    this.originalRepLevels = repLevels != null ? repLevels.clone() : new short[0];
+    this.originalDefLevels = defLevels != null ? defLevels.clone() : new short[0];
     this.repLevels = repLevels != null ? repLevels.clone() : new short[0];
     this.defLevels = defLevels != null ? defLevels.clone() : new short[0];
     this.layers = layers;
@@ -546,8 +550,20 @@ public class RepDefUnraveler {
     return defLevels;
   }
 
+  public short[] getOriginalRepLevels() {
+    return originalRepLevels;
+  }
+
+  public short[] getOriginalDefLevels() {
+    return originalDefLevels;
+  }
+
   public int getCurrentLayer() {
     return currentLayer;
+  }
+
+  public List<RepDefLayer> getLayers() {
+    return layers;
   }
 
   public int getNumItems() {
