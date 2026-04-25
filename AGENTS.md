@@ -141,6 +141,10 @@ mvn compile
 mvn test
 ```
 
+> ⚠️ **CRITICAL: Always use `mvn clean test` before committing.**
+>
+> Because `lance-format` is a library dependency of `lance-tests-compat`, an incremental build (`mvn test` without `clean`) may reuse a stale `lance-format-*.jar` from the local Maven repository (`~/.m2`) or the previous build. This can mask compilation errors or test failures in `lance-format` itself, giving a false pass. Commit `b17cdd2` was reverted because it passed under an incremental build but failed under `mvn clean test`.
+
 ### Clean and install
 ```bash
 mvn clean install
@@ -274,4 +278,4 @@ Repetition levels are required for nested lists (e.g. `list_(list_(int32()))`) i
 - When adding a new **V2.1** page layout decoder, add it to `PageDecoder.createPageLayoutDecoder()` and implement `PageLayoutDecoder`.
 - When adding support for a new Arrow type, update `LanceSchemaConverter.parseLogicalType()`.
 - When adding a new milestone test, create both a Python generator in `compat_tests/` and a Java test class in `lance-tests-compat`.
-- Always run the full `mvn test` suite after changes to `lance-format` because that module has no unit tests of its own.
+- Always run the full **`mvn clean test`** suite after changes to `lance-format` because that module has no unit tests of its own. Skipping `clean` risks testing against a stale compiled JAR and hiding real failures.
