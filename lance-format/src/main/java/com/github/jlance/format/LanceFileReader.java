@@ -861,23 +861,7 @@ public class LanceFileReader implements AutoCloseable {
         pageLayers = constantLayout.getLayersList();
 
         boolean hasListLayer = pageLayers.stream().anyMatch(l -> isListLayer(l));
-        if (hasListLayer
-            && constantLayout.getNumRepValues() == 0
-            && constantLayout.getNumDefValues() == 0) {
-          if (!hasParentRepDef) {
-            if (store.getCurrentBufferIndex() < store.getBufferCount()) {
-              store.takeNextBuffer();
-            }
-            if (store.getCurrentBufferIndex() < store.getBufferCount()) {
-              store.takeNextBuffer();
-            }
-            repLevels = new short[0];
-            defLevels = new short[0];
-            allRepLevels.add(repLevels);
-            allDefLevels.add(defLevels);
-          }
-          itemCount = 0;
-        } else if (hasListLayer) {
+        if (hasListLayer) {
           if (!hasParentRepDef) {
             if (store.getCurrentBufferIndex() < store.getBufferCount()) {
               byte[] repBuffer = store.takeNextBuffer();
