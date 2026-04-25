@@ -784,15 +784,6 @@ public class LanceFileReader implements AutoCloseable {
     List<short[]> allRepLevels = new ArrayList<>();
     List<short[]> allDefLevels = new ArrayList<>();
     List<FieldVector> itemVectors = new ArrayList<>();
-    boolean allPagesConstantLayout = true;
-    for (ColumnMetadata.Page page : cm.getPagesList()) {
-      PageLayout layout = PageDecoder.unpackPageLayout(page.getEncoding());
-      if (layout == null || !layout.hasConstantLayout()) {
-        allPagesConstantLayout = false;
-        break;
-      }
-    }
-
 
     if (hasParentRepDef) {
       // Use parent's already-truncated rep/def instead of re-reading from file.
@@ -836,8 +827,8 @@ public class LanceFileReader implements AutoCloseable {
               layout, pageRows, store, allocator);
           defLevels = MiniBlockLayoutDecoder.extractDefinitionLevels(
               layout, pageRows, store, allocator);
-          allRepLevels.add(repLevels);
-          allDefLevels.add(defLevels);
+          allRepLevels.add(repLevels != null ? repLevels : new short[0]);
+          allDefLevels.add(defLevels != null ? defLevels : new short[0]);
         }
         pageLayers = miniBlock.getLayersList();
 
@@ -867,8 +858,8 @@ public class LanceFileReader implements AutoCloseable {
               defBB.asShortBuffer().get(defLevels);
             }
           }
-          allRepLevels.add(repLevels);
-          allDefLevels.add(defLevels);
+          allRepLevels.add(repLevels != null ? repLevels : new short[0]);
+          allDefLevels.add(defLevels != null ? defLevels : new short[0]);
         }
 
         short[] currentRep = hasParentRepDef ? allRepLevels.get(0) : repLevels;
@@ -895,17 +886,32 @@ public class LanceFileReader implements AutoCloseable {
     List<RepDefLayer> layers;
     if (hasParentRepDef) {
       layers = parentLayers;
-    } else if (cm.getPages(0).getEncoding().hasDirect()) {
-      PageLayout firstLayout = PageDecoder.unpackPageLayout(cm.getPages(0).getEncoding());
-      if (firstLayout.hasMiniBlockLayout()) {
-        layers = firstLayout.getMiniBlockLayout().getLayersList();
-      } else if (firstLayout.hasConstantLayout()) {
-        layers = firstLayout.getConstantLayout().getLayersList();
-      } else {
-        layers = java.util.Collections.emptyList();
-      }
     } else {
-      layers = java.util.Collections.emptyList();
+      List<ColumnMetadata.Page> pages = cm.getPagesList();
+      List<RepDefLayer> deepestLayers = java.util.Collections.emptyList();
+      int maxListLayers = -1;
+      for (ColumnMetadata.Page page : pages) {
+        if (page.getEncoding().hasDirect()) {
+          PageLayout layout = PageDecoder.unpackPageLayout(page.getEncoding());
+          List<RepDefLayer> candidate = java.util.Collections.emptyList();
+          if (layout != null && layout.hasMiniBlockLayout()) {
+            candidate = layout.getMiniBlockLayout().getLayersList();
+          } else if (layout != null && layout.hasConstantLayout()) {
+            candidate = layout.getConstantLayout().getLayersList();
+          }
+          int listLayerCount = 0;
+          for (RepDefLayer layer : candidate) {
+            if (isListLayer(layer)) {
+              listLayerCount++;
+            }
+          }
+          if (listLayerCount > maxListLayers) {
+            maxListLayers = listLayerCount;
+            deepestLayers = candidate;
+          }
+        }
+      }
+      layers = deepestLayers;
     }
 
     int listLayerCount = 0;
@@ -923,7 +929,7 @@ public class LanceFileReader implements AutoCloseable {
       int unravelCount = countListLayersDeep(field) - countListLayersDeep(itemField);
 
       // For nested list items (non-struct), unravel all list layers here.
-      if (itemIsList && !allPagesConstantLayout) {
+      if (itemIsList) {
         unravelCount = countListLayersDeep(field);
         skipLayers = 0;
       }
@@ -960,7 +966,7 @@ public class LanceFileReader implements AutoCloseable {
 
       // For ConstantLayout nested lists, manually build any missing inner list layer(s)
       // because RepDefUnraveler may only see the outer list layer(s).
-      if (itemIsList && allPagesConstantLayout && !layerResults.isEmpty()) {
+      if (itemIsList && !layerResults.isEmpty()) {
         int missingLayers = countListLayersDeep(field) - layerResults.size();
         for (int m = 0; m < missingLayers; m++) {
           int innerCount = (m == 0)
