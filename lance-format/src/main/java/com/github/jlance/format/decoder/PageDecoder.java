@@ -81,6 +81,8 @@ public class PageDecoder {
         throw new IllegalArgumentException("Page encoding is not a direct PageLayout (V2.1+)");
       }
       PageLayoutDecoder decoder = createPageLayoutDecoder(layout);
+      System.err.println("[DEBUG-PageDecoder] field=" + field.getName()
+          + " decoder=" + decoder.getClass().getSimpleName());
       return decoder.decodeWithRepDef(layout, numRows, store, field, allocator);
     } else {
       ArrayEncoding encoding = unpackArrayEncoding(page.getEncoding());

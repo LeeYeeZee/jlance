@@ -3,6 +3,7 @@
 
 package com.github.jlance.format.decoder;
 
+import com.github.jlance.format.RepDefUnraveler;
 import com.github.jlance.format.buffer.PageBufferStore;
 import java.util.List;
 import lance.encodings21.EncodingsV21.ConstantLayout;
@@ -88,7 +89,12 @@ public class ConstantLayoutDecoder implements PageLayoutDecoder {
     } else {
       vector = decodeAllSameValue(constantLayout, numRows, field, allocator);
     }
-    return new DecodedArray(vector, repLevels, defLevels, layers);
+    RepDefUnraveler unraveler = new RepDefUnraveler(
+        repLevels, defLevels, layers, vector.getValueCount());
+    if (repLevels != null || defLevels != null) {
+      unraveler.skipValidity();
+    }
+    return new DecodedArray(vector, unraveler);
   }
 
   private static boolean isSupportedLayer(List<RepDefLayer> layers) {

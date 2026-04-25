@@ -447,7 +447,13 @@ public class LanceFileReader implements AutoCloseable {
       short[] mergedRep = mergeShortArrays(pageArrays, a -> a.repLevels);
       short[] mergedDef = mergeShortArrays(pageArrays, a -> a.defLevels);
       List<RepDefLayer> layers = pageArrays.isEmpty() ? null : pageArrays.get(0).layers;
-      result = new DecodedArray(target, mergedRep, mergedDef, layers);
+      RepDefUnraveler unraveler = null;
+      if (layers != null && !layers.isEmpty()) {
+        unraveler = new RepDefUnraveler(
+            mergedRep, mergedDef, layers, target.getValueCount());
+        unraveler.skipValidity();
+      }
+      result = new DecodedArray(target, unraveler);
     }
 
     return result;
@@ -767,7 +773,12 @@ public class LanceFileReader implements AutoCloseable {
     // Merge item vectors into a single vector.
     FieldVector itemVec = mergeFieldVectors(itemVectors, field, allocator);
 
-    return new DecodedArray(itemVec, repLevels, defLevels, layers);
+    RepDefUnraveler unraveler = null;
+    if (layers != null && !layers.isEmpty()) {
+      unraveler = new RepDefUnraveler(repLevels, defLevels, layers, itemVec.getValueCount());
+      unraveler.skipValidity();
+    }
+    return new DecodedArray(itemVec, unraveler);
   }
 
   private static StructVector buildStructWithChildren(

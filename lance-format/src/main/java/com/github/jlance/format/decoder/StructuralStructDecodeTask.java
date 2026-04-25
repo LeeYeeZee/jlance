@@ -141,41 +141,19 @@ public class StructuralStructDecodeTask {
       childVec.close();
     }
 
-    // V2.1+ nullable struct: derive validity from first child's ORIGINAL rep/def levels.
-    // We must use the pre-truncated levels because struct nullability is orthogonal to
-    // any list layers that the child may have consumed.
+    // V2.1+ nullable struct: derive validity from the shared rep/def unraveler.
+    // The first child's unraveler has already had its inner layers consumed by the
+    // page decoder (via skipValidity); the next layer is the struct's NullableItem.
+    // This mirrors Rust RepDefStructDecodeTask::decode where repdef.unravel_validity()
+    // is called after all children have consumed their layers.
     if (isNullableStruct && !childArrays.isEmpty()) {
-      DecodedArray firstChild = childArrays.get(0);
-      RepDefUnraveler childUnraveler = firstChild.unraveler;
-      short[] def = childUnraveler != null
-          ? childUnraveler.getOriginalDefLevels() : firstChild.defLevels;
-      short[] rep = childUnraveler != null
-          ? childUnraveler.getOriginalRepLevels() : firstChild.repLevels;
-      List<RepDefLayer> layers = childUnraveler != null
-          ? childUnraveler.getLayers() : firstChild.layers;
-      if (def != null && def.length > 0 && layers != null) {
-        int nullStructLevel = computeOuterNullItemLevel(layers);
-        if (nullStructLevel >= 0) {
-          if (rep != null && rep.length > 0) {
-            // List child: rep > 0 marks a new row.  Check the first entry of each row.
-            int entryIdx = 0;
-            for (int row = 0; row < structValueCount && entryIdx < rep.length; row++) {
-              boolean structNull = (def[entryIdx] == nullStructLevel);
-              BitVectorHelper.setValidityBit(
-                  struct.getValidityBuffer(), row, structNull ? 0 : 1);
-              // Advance to the start of the next row.
-              entryIdx++;
-              while (entryIdx < rep.length && rep[entryIdx] == 0) {
-                entryIdx++;
-              }
-            }
-          } else {
-            // Primitive child (no list layer)
-            for (int i = 0; i < structValueCount && i < def.length; i++) {
-              boolean structNull = (def[i] == nullStructLevel);
-              BitVectorHelper.setValidityBit(
-                  struct.getValidityBuffer(), i, structNull ? 0 : 1);
-            }
+      RepDefUnraveler unraveler = childArrays.get(0).unraveler;
+      if (unraveler != null) {
+        boolean[] validity = unraveler.unravelValidity(structValueCount);
+        if (validity != null) {
+          for (int i = 0; i < validity.length && i < structValueCount; i++) {
+            BitVectorHelper.setValidityBit(
+                struct.getValidityBuffer(), i, validity[i] ? 1 : 0);
           }
         }
       }
@@ -190,36 +168,4 @@ public class StructuralStructDecodeTask {
     return new DecodedArray(struct);
   }
 
-  /**
-   * Computes the definition level at which a struct item is considered null.
-   *
-   * <p>Scans layers inner-to-outer and returns the level corresponding to the
-   * first {@code NullableItem} layer encountered.  Returns -1 if no nullable
-   * item layer exists.
-   */
-  private static int computeOuterNullItemLevel(List<RepDefLayer> layers) {
-    int currentDef = 0;
-    int outerNullItemLevel = -1;
-    for (RepDefLayer layer : layers) {
-      switch (layer) {
-        case REPDEF_ALL_VALID_ITEM:
-        case REPDEF_ALL_VALID_LIST:
-          break;
-        case REPDEF_NULLABLE_ITEM:
-          outerNullItemLevel = currentDef + 1;
-          currentDef += 1;
-          break;
-        case REPDEF_NULLABLE_LIST:
-        case REPDEF_EMPTYABLE_LIST:
-          currentDef += 1;
-          break;
-        case REPDEF_NULL_AND_EMPTY_LIST:
-          currentDef += 2;
-          break;
-        default:
-          break;
-      }
-    }
-    return outerNullItemLevel;
-  }
 }

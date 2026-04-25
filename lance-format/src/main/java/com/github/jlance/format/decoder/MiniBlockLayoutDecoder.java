@@ -3,6 +3,7 @@
 
 package com.github.jlance.format.decoder;
 
+import com.github.jlance.format.RepDefUnraveler;
 import com.github.jlance.format.buffer.PageBufferStore;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
@@ -51,7 +52,16 @@ public class MiniBlockLayoutDecoder implements PageLayoutDecoder {
     }
 
     FieldVector vector = decode(layout, numRows, store, field, allocator);
-    return new DecodedArray(vector, repLevels, defLevels, layers);
+    RepDefUnraveler unraveler = new RepDefUnraveler(
+        repLevels, defLevels, layers, vector.getValueCount());
+    // decode() has already applied primitive/item validity to the vector.
+    // Advance the unraveler past that consumed layer so that struct/list
+    // parents see the correct remaining state (mirrors Rust where the
+    // field decoder consumes its own layer before returning).
+    if (repLevels != null || defLevels != null) {
+      unraveler.skipValidity();
+    }
+    return new DecodedArray(vector, unraveler);
   }
 
   private static boolean hasRepDefLayers(List<RepDefLayer> layers) {

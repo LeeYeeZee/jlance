@@ -5,6 +5,7 @@ package com.github.jlance.compat;
 
 import static org.junit.jupiter.api.Assertions.*;
 
+import com.github.jlance.format.LanceFileFooter;
 import com.github.jlance.format.LanceFileReader;
 import java.nio.file.Path;
 import java.nio.file.Paths;
@@ -43,6 +44,8 @@ public class Milestone62CompatTest {
         assertEquals("x", bVec.getObject(0).toString());
 
         // Row 1: struct present, a=null, b="y"
+        System.err.println("[TEST] row1 structNull=" + structVec.isNull(1)
+            + " aNull=" + aVec.isNull(1) + " bNull=" + bVec.isNull(1));
         assertFalse(structVec.isNull(1));
         assertTrue(aVec.isNull(1));
         assertEquals("y", bVec.getObject(1).toString());

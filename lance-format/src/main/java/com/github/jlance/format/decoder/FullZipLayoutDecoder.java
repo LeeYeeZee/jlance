@@ -3,6 +3,7 @@
 
 package com.github.jlance.format.decoder;
 
+import com.github.jlance.format.RepDefUnraveler;
 import com.github.jlance.format.buffer.PageBufferStore;
 import java.util.List;
 import lance.encodings21.EncodingsV21.FullZipLayout;
@@ -84,7 +85,12 @@ public class FullZipLayoutDecoder implements PageLayoutDecoder {
     } else {
       vector = values;
     }
-    return new DecodedArray(vector, null, defLevels, layers);
+    RepDefUnraveler unraveler = new RepDefUnraveler(
+        null, defLevels, layers, vector.getValueCount());
+    if (defLevels != null) {
+      unraveler.skipValidity();
+    }
+    return new DecodedArray(vector, unraveler);
   }
 
   private static boolean isSupportedLayer(List<RepDefLayer> layers) {
