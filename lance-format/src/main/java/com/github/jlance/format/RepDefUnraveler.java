@@ -26,6 +26,7 @@ public class RepDefUnraveler {
   private short[] repLevels;
   private short[] defLevels;
   private final List<RepDefLayer> layers;
+  private final int numItems;
 
   // Maps from definition level to the rep level at which that definition level is visible.
   // Mirrors Rust RepDefUnraveler.levels_to_rep.
@@ -58,18 +59,32 @@ public class RepDefUnraveler {
    * @param layers    layer definitions, inner-to-outer
    */
   public RepDefUnraveler(short[] repLevels, short[] defLevels, List<RepDefLayer> layers) {
-    this(repLevels, defLevels, layers, 0, 0, 0);
+    this(repLevels, defLevels, layers, repLevels != null ? repLevels.length : 0);
+  }
+
+  public RepDefUnraveler(short[] repLevels, short[] defLevels, List<RepDefLayer> layers, int numItems) {
+    this(repLevels, defLevels, layers, numItems, 0, 0, 0);
   }
 
   public RepDefUnraveler(short[] repLevels, short[] defLevels, List<RepDefLayer> layers,
-      int startLayer, int startDefCmp, int startRepCmp) {
+      int numItems, int startLayer, int startDefCmp, int startRepCmp) {
     this.repLevels = repLevels != null ? repLevels.clone() : new short[0];
     this.defLevels = defLevels != null ? defLevels.clone() : new short[0];
     this.layers = layers;
+    this.numItems = numItems;
     this.currentLayer = startLayer;
     this.currentDefCmp = startDefCmp;
     this.currentRepCmp = startRepCmp;
     this.levelsToRep = buildLevelsToRep(layers);
+  }
+
+  /**
+   * Backward-compatible constructor that does not require an explicit {@code numItems}.
+   */
+  public RepDefUnraveler(short[] repLevels, short[] defLevels, List<RepDefLayer> layers,
+      int startLayer, int startDefCmp, int startRepCmp) {
+    this(repLevels, defLevels, layers, repLevels != null ? repLevels.length : 0,
+        startLayer, startDefCmp, startRepCmp);
   }
 
   /**
@@ -110,6 +125,25 @@ public class RepDefUnraveler {
       }
     }
     return table;
+  }
+
+  /**
+   * Returns true if the current layer has no nulls (all valid).
+   *
+   * <p>Mirrors Rust {@code RepDefUnraveler::is_all_valid}.
+   */
+  public boolean isAllValid() {
+    if (currentLayer >= layers.size()) {
+      return true;
+    }
+    return defLevels == null || defLevels.length == 0
+        || isAllValidLayer(layers.get(currentLayer));
+  }
+
+  private static boolean isAllValidLayer(RepDefLayer layer) {
+    return layer == RepDefLayer.REPDEF_ALL_VALID_ITEM
+        || layer == RepDefLayer.REPDEF_ALL_VALID_LIST
+        || layer == RepDefLayer.REPDEF_EMPTYABLE_LIST;
   }
 
   /**
@@ -173,8 +207,6 @@ public class RepDefUnraveler {
     }
 
     // Skip non-list layers (e.g. AllValidItem, NullableItem) at the current position.
-    // This aligns with Rust's RepDefUnraveler where unravel_offsets is only called
-    // for list layers, and item layers are handled by the primitive decoder.
     while (currentLayer < layers.size() && !isListLayer(layers.get(currentLayer))) {
       currentDefCmp += defLevelsForLayer(layers.get(currentLayer));
       currentLayer++;
@@ -215,7 +247,6 @@ public class RepDefUnraveler {
     currentLayer++;
 
     // Compute max_level: the highest def that is still visible at this rep level.
-    // Account for inner NullableItem layers that may appear before the next list layer.
     int maxLevel = Math.max(nullLevel, Math.max(emptyLevel, validLevel));
     int upperNull = maxLevel;
     for (int i = currentLayer; i < layers.size(); i++) {
@@ -236,10 +267,6 @@ public class RepDefUnraveler {
     List<Boolean> validityList = new ArrayList<>();
     int curlen = 0;
 
-    // If offsets already has a trailing value from a previous page/unravel, pop it
-    // (not needed in our merged-buffer case, but kept for parity with Rust)
-
-
     if (hasDef) {
       int readIdx = 0;
       int writeIdx = 0;
@@ -255,10 +282,9 @@ public class RepDefUnraveler {
 
           if (defVal > maxLevel) {
             // Masked by upper null; invisible at this rep level.
-            // Do NOT add offset, but keep in buffers for upper layers.
 
           } else if (defVal == 0) {
-            // Valid list (Rust compatibility: def=0 is always valid at this layer)
+            // Valid list
             offsets.add(curlen);
             curlen += 1;
             validityList.add(true);
@@ -327,9 +353,16 @@ public class RepDefUnraveler {
     for (int i = 0; i < offsets.size(); i++) {
       offArray[i] = offsets.get(i);
     }
-    boolean[] valArray = new boolean[validityList.size()];
-    for (int i = 0; i < validityList.size(); i++) {
-      valArray[i] = validityList.get(i);
+
+    // For AllValidList and EmptyableList we don't need a validity bitmap.
+    // (mirrors Rust where is_all_valid() is true for these layer types)
+    boolean[] valArray = null;
+    if (currentLayerType == RepDefLayer.REPDEF_NULLABLE_LIST
+        || currentLayerType == RepDefLayer.REPDEF_NULL_AND_EMPTY_LIST) {
+      valArray = new boolean[validityList.size()];
+      for (int i = 0; i < validityList.size(); i++) {
+        valArray[i] = validityList.get(i);
+      }
     }
 
     return new UnravelResult(offArray, valArray);
@@ -362,12 +395,9 @@ public class RepDefUnraveler {
     switch (currentLayerType) {
       case REPDEF_ALL_VALID_LIST:
         offsets = new int[numRows + 1];
-        validity = new boolean[numRows];
+        validity = null;
         for (int i = 0; i <= numRows; i++) {
           offsets[i] = i;
-        }
-        for (int i = 0; i < numRows; i++) {
-          validity[i] = true;
         }
         break;
       case REPDEF_NULLABLE_LIST:
@@ -382,16 +412,13 @@ public class RepDefUnraveler {
         break;
       case REPDEF_EMPTYABLE_LIST:
         offsets = new int[numRows + 1];
-        validity = new boolean[numRows];
+        validity = null;
         for (int i = 0; i <= numRows; i++) {
           offsets[i] = 0;
         }
-        for (int i = 0; i < numRows; i++) {
-          validity[i] = true;
-        }
         break;
       case REPDEF_NULL_AND_EMPTY_LIST:
-        // For constant layout with NULL_AND_EMPTY, we assume all null (consistent with M42)
+        // For constant layout with NULL_AND_EMPTY, we assume all null
         offsets = new int[numRows + 1];
         validity = new boolean[numRows];
         for (int i = 0; i <= numRows; i++) {
@@ -407,6 +434,70 @@ public class RepDefUnraveler {
     }
 
     return new UnravelResult(offsets, validity);
+  }
+
+  /**
+   * Unravels a layer of validity from the definition levels.
+   *
+   * <p>Mirrors Rust {@code RepDefUnraveler::unravel_validity}.
+   *
+   * @param numValues number of values expected (used for AllValidItem shortcut)
+   * @return a boolean array where {@code true} = valid, {@code false} = null;
+   *         returns {@code null} if there are no nullable layers (all valid).
+   */
+  public boolean[] unravelValidity(int numValues) {
+    if (currentLayer >= layers.size()) {
+      boolean[] validity = new boolean[numValues];
+      java.util.Arrays.fill(validity, true);
+      return validity;
+    }
+
+    RepDefLayer meaning = layers.get(currentLayer);
+    if (meaning == RepDefLayer.REPDEF_ALL_VALID_ITEM
+        || defLevels == null || defLevels.length == 0) {
+      currentLayer++;
+      currentDefCmp += defLevelsForLayer(meaning);
+      boolean[] validity = new boolean[numValues];
+      java.util.Arrays.fill(validity, true);
+      return validity;
+    }
+
+    currentLayer++;
+    int currentDefCmpLocal = currentDefCmp;
+    currentDefCmp += defLevelsForLayer(meaning);
+
+    // Count filtered elements to allocate exact size
+    int count = 0;
+    for (int i = 0; i < defLevels.length; i++) {
+      short level = defLevels[i];
+      if (level >= 0 && level < levelsToRep.length && levelsToRep[level] <= currentRepCmp) {
+        count++;
+      }
+    }
+
+    boolean[] validity = new boolean[count];
+    int idx = 0;
+    for (int i = 0; i < defLevels.length; i++) {
+      short level = defLevels[i];
+      if (level >= 0 && level < levelsToRep.length && levelsToRep[level] <= currentRepCmp) {
+        validity[idx++] = level <= currentDefCmpLocal;
+      }
+    }
+    return validity;
+  }
+
+  /**
+   * Convenience overload that uses the unraveler's {@code numItems} as the value count.
+   */
+  public boolean[] unravelValidity() {
+    return unravelValidity(numItems);
+  }
+
+  public void skipValidity() {
+    if (currentLayer < layers.size() && !isListLayer(layers.get(currentLayer))) {
+      currentDefCmp += defLevelsForLayer(layers.get(currentLayer));
+      currentLayer++;
+    }
   }
 
   private static int defLevelsForLayer(RepDefLayer layer) {
@@ -447,40 +538,6 @@ public class RepDefUnraveler {
     }
   }
 
-  /**
-   * Reconstructs the validity bitmap for the innermost primitive or struct
-   * after all list layers have been consumed.
-   *
-   * <p>Mirrors Rust {@code RepDefUnraveler::unravel_validity}.
-   *
-   * @return a boolean array where {@code true} = valid, {@code false} = null;
-   *         returns {@code null} if there are no nullable layers (all valid).
-   */
-  public boolean[] unravelValidity() {
-    // Skip remaining non-list layers
-    while (currentLayer < layers.size() && !isListLayer(layers.get(currentLayer))) {
-      RepDefLayer layer = layers.get(currentLayer);
-      if (layer == RepDefLayer.REPDEF_NULLABLE_ITEM) {
-        int nullLevel = currentDefCmp + 1;
-        boolean[] validity = new boolean[repLevels.length];
-        if (defLevels.length > 0) {
-          for (int i = 0; i < repLevels.length; i++) {
-            validity[i] = (defLevels[i] != nullLevel);
-          }
-        } else {
-          // No def levels means all valid (ConstantLayout optimization)
-          java.util.Arrays.fill(validity, true);
-        }
-        currentLayer++;
-        currentDefCmp += 1;
-        return validity;
-      }
-      // AllValidItem: nothing to do, just skip
-      currentLayer++;
-    }
-    return null;
-  }
-
   public short[] getRepLevels() {
     return repLevels;
   }
@@ -491,6 +548,10 @@ public class RepDefUnraveler {
 
   public int getCurrentLayer() {
     return currentLayer;
+  }
+
+  public int getNumItems() {
+    return numItems;
   }
 
   private static boolean isListLayer(RepDefLayer layer) {

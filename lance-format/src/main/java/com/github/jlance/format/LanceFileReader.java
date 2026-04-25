@@ -513,39 +513,43 @@ public class LanceFileReader implements AutoCloseable {
     if (cm.getPagesCount() == 0) {
       throw new IllegalStateException("Column " + field.getName() + " has no pages");
     }
+
+    DecodedArray result;
     if (cm.getPagesCount() == 1) {
-      return decoder.decodePageWithRepDef(cm.getPages(0), field, numRows, isV21);
+      result = decoder.decodePageWithRepDef(cm.getPages(0), field, numRows, isV21);
+    } else {
+      // Multi-page column: decode each page and append into a single vector.
+      @SuppressWarnings("unchecked")
+      FieldVector target = (FieldVector) field.createVector(allocator);
+      target.allocateNew();
+
+      @SuppressWarnings("unchecked")
+      List<ValueVector> pageVectors = new ArrayList<>();
+      List<DecodedArray> pageArrays = new ArrayList<>();
+      for (ColumnMetadata.Page page : cm.getPagesList()) {
+        int pageRows = (int) page.getLength();
+        DecodedArray pageArray = decoder.decodePageWithRepDef(page, field, pageRows, isV21);
+        pageArrays.add(pageArray);
+        pageVectors.add(pageArray.vector);
+      }
+
+      @SuppressWarnings("unchecked")
+      FieldVector[] sources = pageVectors.toArray(new FieldVector[0]);
+      VectorBatchAppender.batchAppend(target, sources);
+
+      for (ValueVector v : pageVectors) {
+        v.close();
+      }
+      target.setValueCount(target.getValueCount());
+
+      // Merge rep/def state across pages
+      short[] mergedRep = mergeShortArrays(pageArrays, a -> a.repLevels);
+      short[] mergedDef = mergeShortArrays(pageArrays, a -> a.defLevels);
+      List<RepDefLayer> layers = pageArrays.isEmpty() ? null : pageArrays.get(0).layers;
+      result = new DecodedArray(target, mergedRep, mergedDef, layers);
     }
 
-    // Multi-page column: decode each page and append into a single vector.
-    @SuppressWarnings("unchecked")
-    FieldVector target = (FieldVector) field.createVector(allocator);
-    target.allocateNew();
-
-    @SuppressWarnings("unchecked")
-    List<ValueVector> pageVectors = new ArrayList<>();
-    List<DecodedArray> pageArrays = new ArrayList<>();
-    for (ColumnMetadata.Page page : cm.getPagesList()) {
-      int pageRows = (int) page.getLength();
-      DecodedArray pageArray = decoder.decodePageWithRepDef(page, field, pageRows, isV21);
-      pageArrays.add(pageArray);
-      pageVectors.add(pageArray.vector);
-    }
-
-    @SuppressWarnings("unchecked")
-    FieldVector[] sources = pageVectors.toArray(new FieldVector[0]);
-    VectorBatchAppender.batchAppend(target, sources);
-
-    for (ValueVector v : pageVectors) {
-      v.close();
-    }
-    target.setValueCount(target.getValueCount());
-
-    // Merge rep/def state across pages
-    short[] mergedRep = mergeShortArrays(pageArrays, a -> a.repLevels);
-    short[] mergedDef = mergeShortArrays(pageArrays, a -> a.defLevels);
-    List<RepDefLayer> layers = pageArrays.isEmpty() ? null : pageArrays.get(0).layers;
-    return new DecodedArray(target, mergedRep, mergedDef, layers);
+    return result;
   }
 
   private static short[] mergeShortArrays(
@@ -837,32 +841,17 @@ public class LanceFileReader implements AutoCloseable {
         }
         pageLayers = miniBlock.getLayersList();
 
-        short[] currentRep = hasParentRepDef ? allRepLevels.get(0) : repLevels;
-        short[] currentDef = hasParentRepDef
-            ? (allDefLevels.isEmpty() ? null : allDefLevels.get(0)) : defLevels;
-        boolean pageHasDef = currentDef != null && currentDef.length > 0;
-        if (pageHasDef) {
-          int maxVisibleLevel = computeMaxVisibleLevel(pageLayers);
-          itemCount = 0;
-          for (int i = 0; i < currentRep.length; i++) {
-            if (currentDef[i] <= maxVisibleLevel) {
-              itemCount++;
-            }
-          }
-        } else {
-          itemCount = currentRep != null ? currentRep.length : 0;
-        }
-
         store.resetBufferIndex();
         MiniBlockLayoutDecoder decoder = new MiniBlockLayoutDecoder();
-        itemVec = decoder.decode(layout, itemCount, store, innermostField, allocator);
+        int pageNumItems = (int) miniBlock.getNumItems();
+        itemVec = decoder.decode(layout, pageNumItems, store, innermostField, allocator);
       } else if (layout.hasConstantLayout()) {
         var constantLayout = layout.getConstantLayout();
         pageLayers = constantLayout.getLayersList();
 
-        boolean hasListLayer = pageLayers.stream().anyMatch(l -> isListLayer(l));
-        if (hasListLayer) {
-          if (!hasParentRepDef) {
+        boolean pageHasListLayer = pageLayers.stream().anyMatch(l -> isListLayer(l));
+        if (!hasParentRepDef) {
+          if (pageHasListLayer) {
             if (store.getCurrentBufferIndex() < store.getBufferCount()) {
               byte[] repBuffer = store.takeNextBuffer();
               int numRep = repBuffer.length / 2;
@@ -877,33 +866,18 @@ public class LanceFileReader implements AutoCloseable {
               ByteBuffer defBB = ByteBuffer.wrap(defBuffer).order(ByteOrder.LITTLE_ENDIAN);
               defBB.asShortBuffer().get(defLevels);
             }
-            allRepLevels.add(repLevels);
-            allDefLevels.add(defLevels);
           }
-
-          short[] currentRep = hasParentRepDef ? allRepLevels.get(0) : repLevels;
-          short[] currentDef = hasParentRepDef
-              ? (allDefLevels.isEmpty() ? null : allDefLevels.get(0)) : defLevels;
-          boolean pageHasDef = currentDef != null && currentDef.length > 0;
-          if (pageHasDef) {
-            int maxVisibleLevel = computeMaxVisibleLevel(pageLayers);
-            itemCount = 0;
-            for (int i = 0; i < currentRep.length; i++) {
-              if (currentDef[i] <= maxVisibleLevel) {
-                itemCount++;
-              }
-            }
-          } else {
-            itemCount = currentRep != null ? currentRep.length : 0;
-          }
-        } else {
-          if (!hasParentRepDef) {
-            itemCount = repLevels != null ? repLevels.length : 0;
-          }
+          allRepLevels.add(repLevels);
+          allDefLevels.add(defLevels);
         }
 
+        short[] currentRep = hasParentRepDef ? allRepLevels.get(0) : repLevels;
+        int pageItemCount = pageHasListLayer
+            ? (currentRep != null ? currentRep.length : 0)
+            : pageRows;
+
         ConstantLayoutDecoder decoder = new ConstantLayoutDecoder();
-        itemVec = decoder.decode(layout, itemCount, store, innermostField, allocator);
+        itemVec = decoder.decode(layout, pageItemCount, store, innermostField, allocator);
       } else {
         throw new UnsupportedOperationException(
             "Unsupported V2.1 list layout: " + layout.getLayoutCase());
@@ -1219,9 +1193,9 @@ public class LanceFileReader implements AutoCloseable {
    *
    * <p>For {@code list<list<list<int>>>}:
    * <ul>
-   *   <li>depth 0 → {@code list<list<list<int>>>}</li>
-   *   <li>depth 1 → {@code list<list<int>>}</li>
-   *   <li>depth 2 → {@code list<int>}</li>
+   *   <li>depth 0 鈫?{@code list<list<list<int>>>}</li>
+   *   <li>depth 1 鈫?{@code list<list<int>>}</li>
+   *   <li>depth 2 鈫?{@code list<int>}</li>
    * </ul>
    */
   private static Field getFieldAtDepth(Field rootField, int depth) {
@@ -1267,11 +1241,17 @@ public class LanceFileReader implements AutoCloseable {
         offsetBuf.setInt(i * 4, result.offsets[i]);
       }
 
-      for (int i = 0; i < numRows; i++) {
-        if (i < result.validity.length && result.validity[i]) {
+      if (result.validity != null) {
+        for (int i = 0; i < numRows; i++) {
+          if (i < result.validity.length && result.validity[i]) {
+            listVec.setNotNull(i);
+          } else {
+            listVec.setNull(i);
+          }
+        }
+      } else {
+        for (int i = 0; i < numRows; i++) {
           listVec.setNotNull(i);
-        } else {
-          listVec.setNull(i);
         }
       }
 
@@ -1296,11 +1276,17 @@ public class LanceFileReader implements AutoCloseable {
         offsetBuf.setLong(i * 8, result.offsets[i]);
       }
 
-      for (int i = 0; i < numRows; i++) {
-        if (i < result.validity.length && result.validity[i]) {
+      if (result.validity != null) {
+        for (int i = 0; i < numRows; i++) {
+          if (i < result.validity.length && result.validity[i]) {
+            listVec.setNotNull(i);
+          } else {
+            listVec.setNull(i);
+          }
+        }
+      } else {
+        for (int i = 0; i < numRows; i++) {
           listVec.setNotNull(i);
-        } else {
-          listVec.setNull(i);
         }
       }
 
@@ -1363,58 +1349,6 @@ public class LanceFileReader implements AutoCloseable {
     }
     target.setValueCount(target.getValueCount());
     return target;
-  }
-
-  private static int computeMaxVisibleLevel(List<RepDefLayer> layers) {
-    int level = 0;
-    for (RepDefLayer layer : layers) {
-      if (isListLayer(layer)) {
-        break;
-      }
-      switch (layer) {
-        case REPDEF_ALL_VALID_ITEM:
-        case REPDEF_ALL_VALID_LIST:
-          break;
-        case REPDEF_NULLABLE_ITEM:
-        case REPDEF_NULLABLE_LIST:
-        case REPDEF_EMPTYABLE_LIST:
-          level += 1;
-          break;
-        case REPDEF_NULL_AND_EMPTY_LIST:
-          level += 2;
-          break;
-        default:
-          break;
-      }
-    }
-    return level;
-  }
-
-  /**
-   * Returns the def level that indicates a null <strong>innermost</strong> item.
-   * Scans layers inner-to-outer and stops at the first {@code NullableItem}.
-   */
-  private static int computeNullItemLevel(List<RepDefLayer> layers) {
-    int currentDef = 0;
-    for (RepDefLayer layer : layers) {
-      switch (layer) {
-        case REPDEF_ALL_VALID_ITEM:
-        case REPDEF_ALL_VALID_LIST:
-          break;
-        case REPDEF_NULLABLE_ITEM:
-          return currentDef + 1;
-        case REPDEF_NULLABLE_LIST:
-        case REPDEF_EMPTYABLE_LIST:
-          currentDef += 1;
-          break;
-        case REPDEF_NULL_AND_EMPTY_LIST:
-          currentDef += 2;
-          break;
-        default:
-          break;
-      }
-    }
-    return -1;
   }
 
   /**
