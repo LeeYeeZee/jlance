@@ -1,6 +1,7 @@
 """Generate Lance dataset with schema evolution for Java compat tests."""
 import os
-import lance
+import lance.dataset
+import lance.file
 import pyarrow as pa
 import numpy as np
 
@@ -12,7 +13,7 @@ def write(name, table):
     if os.path.exists(path):
         import shutil
         shutil.rmtree(path)
-    ds = lance.write_dataset(table, path)
+    ds = lance.dataset.write_dataset(table, path)
     return ds
 
 

@@ -1,8 +1,9 @@
-"""Milestone 60: nullable struct<nullable int> â€” stacked NullableItem."""
+"""Milestone 60: nullable struct<nullable int> â€?stacked NullableItem."""
 
 import os
 import pyarrow as pa
-import lance
+import lance.dataset
+import lance.file
 
 DATA_DIR = os.path.join(os.path.dirname(__file__), "data", "milestone_60")
 os.makedirs(DATA_DIR, exist_ok=True)

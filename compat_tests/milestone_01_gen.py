@@ -2,7 +2,8 @@
 import os
 import sys
 import pyarrow as pa
-import lance
+import lance.dataset
+import lance.file
 
 DATA_DIR = os.path.join(os.path.dirname(__file__), "data", "milestone_01")
 
@@ -25,7 +26,7 @@ def main():
         import shutil
         shutil.rmtree(ds_path)
 
-    lance.write_dataset(
+    lance.dataset.write_dataset(
         table,
         ds_path,
         mode="create",
@@ -35,7 +36,7 @@ def main():
     )
 
     print(f"Dataset created at: {ds_path}")
-    ds = lance.dataset(ds_path)
+    ds = lance.dataset.LanceDataset(ds_path)
     print(f"Version: {ds.version}")
     print(f"Schema: {ds.schema}")
     print(f"Num rows: {ds.count_rows()}")

@@ -2,7 +2,8 @@
 
 import os
 import pyarrow as pa
-import lance
+import lance.dataset
+import lance.file
 
 DATA_DIR = os.path.join(os.path.dirname(__file__), "data", "milestone_61")
 os.makedirs(DATA_DIR, exist_ok=True)

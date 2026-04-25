@@ -2,7 +2,8 @@
 import os
 import sys
 import pyarrow as pa
-import lance
+import lance.dataset
+import lance.file
 
 DATA_DIR = os.path.join(os.path.dirname(__file__), "data", "milestone_04")
 
@@ -12,7 +13,7 @@ def write_dataset(name, table):
     if os.path.exists(ds_path):
         import shutil
         shutil.rmtree(ds_path)
-    lance.write_dataset(
+    lance.dataset.write_dataset(
         table,
         ds_path,
         mode="create",

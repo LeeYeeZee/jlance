@@ -1,6 +1,7 @@
 """Generate Lance datasets for Milestone 22: Count Rows compat tests."""
 import os
-import lance
+import lance.dataset
+import lance.file
 import pyarrow as pa
 import numpy as np
 
@@ -12,7 +13,7 @@ def write(name, table):
     if os.path.exists(path):
         import shutil
         shutil.rmtree(path)
-    ds = lance.write_dataset(table, path)
+    ds = lance.dataset.write_dataset(table, path)
     return ds
 
 
@@ -48,7 +49,7 @@ table2 = pa.table({
     "name": pa.array(names2),
     "score": pa.array(scores2),
 })
-lance.write_dataset(table2, os.path.join(OUT, "test_count_rows"), mode="append")
+lance.dataset.write_dataset(table2, os.path.join(OUT, "test_count_rows"), mode="append")
 print("Version 3 rows:", ds.count_rows())
 
 # Dataset 2: empty dataset

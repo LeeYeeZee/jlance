@@ -1,6 +1,7 @@
 """Generate Lance files with Zstd compression for Java compat tests."""
 import os
-import lance
+import lance.dataset
+import lance.file
 import pyarrow as pa
 import numpy as np
 
@@ -12,9 +13,9 @@ def write(name, table):
     if os.path.exists(path):
         import shutil
         shutil.rmtree(path)
-    ds = lance.write_dataset(table, path)
+    ds = lance.dataset.write_dataset(table, path)
     ds.optimize.compact_files()
-    ds = lance.dataset(path)
+    ds = lance.dataset.LanceDataset(path)
     ds.cleanup_old_versions(older_than=0, delete_unverified=True)
 
 

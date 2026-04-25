@@ -311,7 +311,7 @@ public class LanceFileReader implements AutoCloseable {
           return decodePrimitiveColumn(cm, field, footer, numRows, allocator);
         }
       }
-      return buildStructVector(field, nextColIndex, footer, numRows, allocator,
+      return decodeStructColumn(field, nextColIndex, footer, numRows, allocator,
           parentRepLevels, parentDefLevels, parentLayers);
     }
 
@@ -380,17 +380,16 @@ public class LanceFileReader implements AutoCloseable {
     return decodePrimitiveColumn(cm, field, footer, numRows, allocator);
   }
 
-  private DecodedArray buildStructVector(
-      Field field,
-      int[] nextColIndex,
-      LanceFileFooter footer,
-      int numRows,
-      BufferAllocator allocator)
-      throws IOException {
-    return buildStructVector(field, nextColIndex, footer, numRows, allocator, null, null, null);
-  }
-
-  private DecodedArray buildStructVector(
+  /**
+   * Decodes a struct column (V2.1+ structural path or V2.0 fallback).
+   *
+   * <p>Delegates to {@link com.github.jlance.format.decoder.StructuralStructDecodeTask},
+   * the Java analog of Rust {@code StructuralStructDecodeTask} from
+   * {@code lance-encoding/src/encodings/logical/struct.rs}.
+   *
+   * @see com.github.jlance.format.decoder.StructuralStructDecodeTask
+   */
+  private DecodedArray decodeStructColumn(
       Field field,
       int[] nextColIndex,
       LanceFileFooter footer,
@@ -400,101 +399,11 @@ public class LanceFileReader implements AutoCloseable {
       short[] parentDefLevels,
       List<RepDefLayer> parentLayers)
       throws IOException {
-    boolean isV21 = footer.isV2_1OrLater();
-    boolean isNullableStruct = isV21 && field.isNullable();
-    List<DecodedArray> childArrays = new ArrayList<>();
-    List<Integer> childValueCounts = new ArrayList<>();
-
-    // Decode all children first so we know the actual value count.
-    for (int ci = 0; ci < field.getChildren().size(); ci++) {
-      Field childField = field.getChildren().get(ci);
-      DecodedArray childArray = readField(childField, nextColIndex, footer, numRows, allocator,
-          parentRepLevels, parentDefLevels, parentLayers);
-      childArrays.add(childArray);
-      childValueCounts.add(childArray.vector.getValueCount());
-      // If the child consumed rep/def (e.g. a list), subsequent children should
-      // receive the original un-truncated rep/def.  Re-clone for each child.
-      if (parentRepLevels != null && childArray.repLevels != null
-          && childArray.repLevels != parentRepLevels) {
-        parentRepLevels = parentRepLevels.clone();
-        if (parentDefLevels != null) {
-          parentDefLevels = parentDefLevels.clone();
-        }
-      }
-    }
-
-    int structValueCount = numRows;
-    if (!childValueCounts.isEmpty()) {
-      structValueCount = childValueCounts.get(0);
-    }
-
-    // Allocate struct with the correct capacity.  We do this AFTER children are
-    // decoded so that we know the real value count (e.g. a struct inside a list
-    // may have more values than numRows).
-    StructVector struct = (StructVector) field.createVector(allocator);
-    struct.setInitialCapacity(structValueCount);
-    struct.allocateNew();
-    for (int i = 0; i < structValueCount; i++) {
-      org.apache.arrow.vector.BitVectorHelper.setValidityBit(struct.getValidityBuffer(), i, 1);
-    }
-
-    // Transfer decoded children into the struct.
-    for (int ci = 0; ci < field.getChildren().size(); ci++) {
-      Field childField = field.getChildren().get(ci);
-      FieldVector childVec = childArrays.get(ci).vector;
-      @SuppressWarnings("unchecked")
-      FieldVector slot =
-          struct.addOrGet(
-              childField.getName(), childField.getFieldType(),
-              (Class<? extends FieldVector>) childVec.getClass());
-      childVec.makeTransferPair(slot).transfer();
-      childVec.close();
-    }
-
-    // V2.1+ nullable struct: derive validity from first child's ORIGINAL rep/def levels.
-    // We must use the pre-truncated levels because struct nullability is orthogonal to
-    // any list layers that the child may have consumed.
-    if (isNullableStruct && !childArrays.isEmpty()) {
-      DecodedArray firstChild = childArrays.get(0);
-      RepDefUnraveler childUnraveler = firstChild.unraveler;
-      short[] def = childUnraveler != null ? childUnraveler.getOriginalDefLevels() : firstChild.defLevels;
-      short[] rep = childUnraveler != null ? childUnraveler.getOriginalRepLevels() : firstChild.repLevels;
-      List<RepDefLayer> layers = childUnraveler != null ? childUnraveler.getLayers() : firstChild.layers;
-      if (def != null && def.length > 0 && layers != null) {
-        int nullStructLevel = computeOuterNullItemLevel(layers);
-        if (nullStructLevel >= 0) {
-          if (rep != null && rep.length > 0) {
-            // List child: rep > 0 marks a new row.  Check the first entry of each row.
-            int entryIdx = 0;
-            for (int row = 0; row < structValueCount && entryIdx < rep.length; row++) {
-              boolean structNull = (def[entryIdx] == nullStructLevel);
-              org.apache.arrow.vector.BitVectorHelper.setValidityBit(
-                  struct.getValidityBuffer(), row, structNull ? 0 : 1);
-              // Advance to the start of the next row.
-              entryIdx++;
-              while (entryIdx < rep.length && rep[entryIdx] == 0) {
-                entryIdx++;
-              }
-            }
-          } else {
-            // Primitive child (no list layer)
-            for (int i = 0; i < structValueCount && i < def.length; i++) {
-              boolean structNull = (def[i] == nullStructLevel);
-              org.apache.arrow.vector.BitVectorHelper.setValidityBit(
-                  struct.getValidityBuffer(), i, structNull ? 0 : 1);
-            }
-          }
-        }
-      }
-    }
-
-    struct.setValueCount(structValueCount);
-    // Propagate the first child's unraveler upward so that an enclosing list layer
-    // can continue consuming rep/def from the correct state.
-    if (!childArrays.isEmpty() && childArrays.get(0).unraveler != null) {
-      return new DecodedArray(struct, childArrays.get(0).unraveler);
-    }
-    return new DecodedArray(struct);
+    return new com.github.jlance.format.decoder.StructuralStructDecodeTask(
+        field, numRows, allocator, footer, nextColIndex)
+        .decode(parentRepLevels, parentDefLevels, parentLayers,
+            (childField, rep, def, layers) ->
+                readField(childField, nextColIndex, footer, numRows, allocator, rep, def, layers));
   }
 
   private DecodedArray decodePrimitiveColumn(
@@ -1083,31 +992,7 @@ public class LanceFileReader implements AutoCloseable {
    * (e.g. a nullable struct). Scans layers inner-to-outer and returns the
    * <em>last</em> {@code NullableItem} encountered before the first list layer.
    */
-  private static int computeOuterNullItemLevel(List<RepDefLayer> layers) {
-    int currentDef = 0;
-    int outerNullItemLevel = -1;
-    for (RepDefLayer layer : layers) {
-      switch (layer) {
-        case REPDEF_ALL_VALID_ITEM:
-        case REPDEF_ALL_VALID_LIST:
-          break;
-        case REPDEF_NULLABLE_ITEM:
-          outerNullItemLevel = currentDef + 1;
-          currentDef += 1;
-          break;
-        case REPDEF_NULLABLE_LIST:
-        case REPDEF_EMPTYABLE_LIST:
-          currentDef += 1;
-          break;
-        case REPDEF_NULL_AND_EMPTY_LIST:
-          currentDef += 2;
-          break;
-        default:
-          break;
-      }
-    }
-    return outerNullItemLevel;
-  }
+  // computeOuterNullItemLevel moved to StructuralStructDecodeTask
 
   private static int computeNullListLevel(List<RepDefLayer> layers) {
     int currentDef = 0;

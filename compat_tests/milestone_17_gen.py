@@ -1,6 +1,7 @@
 """Generate Lance dataset for column projection compat tests."""
 import os
-import lance
+import lance.dataset
+import lance.file
 import pyarrow as pa
 import numpy as np
 
@@ -9,7 +10,7 @@ OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "mileston
 
 def write(name, table):
     path = os.path.join(OUT, name)
-    lance.write_dataset(table, path)
+    lance.dataset.write_dataset(table, path)
 
 
 N = 50

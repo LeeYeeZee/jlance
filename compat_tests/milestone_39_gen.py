@@ -1,7 +1,8 @@
 """Generate Lance V2.1 dataset for InlineBitpacking / OutOfLineBitpacking tests."""
 import os
 import json
-import lance
+import lance.dataset
+import lance.file
 import pyarrow as pa
 import numpy as np
 

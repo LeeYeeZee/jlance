@@ -1,7 +1,8 @@
 """Generate Lance V2.1 file for Milestone 42: ConstantLayout nested lists."""
 import os
 import pyarrow as pa
-import lance
+import lance.dataset
+import lance.file
 
 DATA_DIR = os.path.join(os.path.dirname(__file__), "data", "milestone_42")
 os.makedirs(DATA_DIR, exist_ok=True)

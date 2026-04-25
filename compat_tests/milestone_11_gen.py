@@ -1,6 +1,7 @@
 """Generate Lance files with halffloat and fixed_size_binary types for Java compat tests."""
 import os
-import lance
+import lance.dataset
+import lance.file
 import pyarrow as pa
 import numpy as np
 
@@ -8,9 +9,9 @@ OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "mileston
 
 def write(name, table):
     path = os.path.join(OUT, name)
-    ds = lance.write_dataset(table, path)
+    ds = lance.dataset.write_dataset(table, path)
     ds.optimize.compact_files()
-    ds = lance.dataset(path)
+    ds = lance.dataset.LanceDataset(path)
     ds.cleanup_old_versions(older_than=0, delete_unverified=True)
 
 # --- Single-page halffloat with nulls ---

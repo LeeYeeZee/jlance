@@ -1,7 +1,8 @@
 """Generate Lance V2.2 BlobLayout file for Milestone 40: large binary / string compat tests."""
 import os
 import pyarrow as pa
-import lance
+import lance.dataset
+import lance.file
 import numpy as np
 
 DATA_DIR = os.path.join(os.path.dirname(__file__), "data", "milestone_40")

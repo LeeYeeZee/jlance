@@ -1,7 +1,8 @@
 """Generate Lance V2.1 file for Milestone 34: Multi-page numeric tests."""
 import os
 import pyarrow as pa
-import lance
+import lance.dataset
+import lance.file
 import numpy as np
 
 DATA_DIR = os.path.join(os.path.dirname(__file__), "data", "milestone_34")

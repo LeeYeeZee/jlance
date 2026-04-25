@@ -1,6 +1,7 @@
 """Generate Lance dataset with multiple fragments for Java compat tests."""
 import os
-import lance
+import lance.dataset
+import lance.file
 import pyarrow as pa
 import numpy as np
 
@@ -14,7 +15,7 @@ def write(name, table, max_rows_per_file=None, max_rows_per_group=None):
         kwargs["max_rows_per_file"] = max_rows_per_file
     if max_rows_per_group is not None:
         kwargs["max_rows_per_group"] = max_rows_per_group
-    ds = lance.write_dataset(table, path, **kwargs)
+    ds = lance.dataset.write_dataset(table, path, **kwargs)
     return ds
 
 

@@ -1,15 +1,16 @@
 """Generate Lance files with dictionary-encoded types for Java compat tests."""
 import os
-import lance
+import lance.dataset
+import lance.file
 import pyarrow as pa
 
 OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "milestone_10")
 
 def write(name, table):
     path = os.path.join(OUT, name)
-    ds = lance.write_dataset(table, path)
+    ds = lance.dataset.write_dataset(table, path)
     ds.optimize.compact_files()
-    ds = lance.dataset(path)
+    ds = lance.dataset.LanceDataset(path)
     ds.cleanup_old_versions(older_than=0, delete_unverified=True)
 
 # --- Dictionary-encoded string ---

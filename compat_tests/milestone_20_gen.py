@@ -1,6 +1,7 @@
 """Generate Lance dataset for row ID testing."""
 import os
-import lance
+import lance.dataset
+import lance.file
 import pyarrow as pa
 import numpy as np
 
@@ -12,7 +13,7 @@ def write(name, table):
     if os.path.exists(path):
         import shutil
         shutil.rmtree(path)
-    ds = lance.write_dataset(table, path)
+    ds = lance.dataset.write_dataset(table, path)
     return ds
 
 
@@ -40,7 +41,7 @@ table1 = pa.table({
     "name": pa.array(names1),
     "score": pa.array(scores1),
 })
-ds = lance.write_dataset(table1, os.path.join(OUT, "test_rowids"), mode="append")
+ds = lance.dataset.write_dataset(table1, os.path.join(OUT, "test_rowids"), mode="append")
 print("Fragment 1 rows:", ds.count_rows())
 
 # --- test_rowids_with_deletions: single fragment, delete 100 rows ---
@@ -50,7 +51,7 @@ print("Deleted dataset rows:", ds_del.count_rows())
 
 # --- test_rowids_multi_frag_with_deletions: 2 fragments, delete from first ---
 ds_mfd = write("test_rowids_multi_frag_with_deletions", table0)
-ds_mfd = lance.write_dataset(table1, os.path.join(OUT, "test_rowids_multi_frag_with_deletions"), mode="append")
+ds_mfd = lance.dataset.write_dataset(table1, os.path.join(OUT, "test_rowids_multi_frag_with_deletions"), mode="append")
 ds_mfd.delete("id >= 100 AND id < 200")
 print("Multi-frag deleted dataset rows:", ds_mfd.count_rows())
 

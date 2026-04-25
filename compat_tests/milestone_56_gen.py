@@ -1,8 +1,9 @@
-"""Milestone 56: 5-level nested list â€” list<list<list<list<list<int>>>>>"""
+"""Milestone 56: 5-level nested list â€?list<list<list<list<list<int>>>>>"""
 
 import os
 import pyarrow as pa
-import lance
+import lance.dataset
+import lance.file
 
 DATA_DIR = os.path.join(os.path.dirname(__file__), "data", "milestone_56")
 os.makedirs(DATA_DIR, exist_ok=True)
